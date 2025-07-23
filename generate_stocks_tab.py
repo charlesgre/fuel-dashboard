@@ -1,13 +1,10 @@
-import streamlit as st
 import pandas as pd
+import streamlit as st
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import timedelta
 import numpy as np
 
-st.set_page_config(layout="wide")
-st.title("📊 Fuel Stock Dashboard")
-
-file_path = "Fuel dashboard/Stocks/Fuel stocks.xlsx"
+FILE_PATH = "Fuel dashboard/Stocks/Fuel stocks.xlsx"
 
 sheets_config = {
     'Data ARA PJK': {'start_row': 6, 'date_col': 'A', 'data_col': 'B'},
@@ -26,12 +23,11 @@ colors = {
 }
 
 def load_and_prepare(sheet_name, config):
-    df = pd.read_excel(file_path, sheet_name=sheet_name, header=None, skiprows=config['start_row'])
+    df = pd.read_excel(FILE_PATH, sheet_name=sheet_name, header=None, skiprows=config['start_row'])
     dates = pd.to_datetime(df[ord(config['date_col']) - 65], errors='coerce')
     values = pd.to_numeric(df[ord(config['data_col']) - 65], errors='coerce')
     df_clean = pd.DataFrame({'Date': dates, 'Value': values}).dropna()
 
-    # Conversion selon la source
     if sheet_name.strip() == "Data ARA PJK":
         df_clean['Value'] *= 6.35 / 1000
     elif sheet_name.strip() in ["Data PADD 3", "Data Singapore"]:
@@ -76,32 +72,38 @@ def build_comparison_table(df):
 
     return pd.DataFrame(records)
 
-# UI
-selected_sheet = st.selectbox("📄 Choisir une feuille", list(sheets_config.keys()))
-df = load_and_prepare(selected_sheet, sheets_config[selected_sheet])
+def generate_stocks_tab():
+    st.write("✅ Tab Stocks appelée")
+    st.header("📦 Seasonal Stocks Overview")
 
-# Chart
-fig = go.Figure()
-for year in sorted(df['Year'].unique()):
-    data_year = df[df['Year'] == year]
-    fig.add_trace(go.Scatter(
-        x=data_year['DOY'], y=data_year['Value'],
-        mode='lines',
-        name=str(year),
-        line=dict(color=colors.get(year, 'gray')),
-        opacity=1.0 if year >= 2023 else 0.6
-    ))
+    for sheet_name, config in sheets_config.items():
+        st.markdown(f"## 📁 {sheet_name}")
 
-fig.update_layout(
-    title=f"📈 Stock saisonnier – {selected_sheet}",
-    xaxis_title="Jour de l'année",
-    yaxis_title="Stock (MMB)",
-    template="plotly_white"
-)
+        df = load_and_prepare(sheet_name, config)
+        fig = go.Figure()
 
-st.plotly_chart(fig, use_container_width=True)
+        for year in sorted(df['Year'].unique()):
+            data_year = df[df['Year'] == year]
+            fig.add_trace(go.Scatter(
+                x=data_year['DOY'],
+                y=data_year['Value'],
+                mode='lines',
+                name=str(year),
+                line=dict(color=colors.get(year, 'gray')),
+                opacity=1.0 if year >= 2023 else 0.6
+            ))
 
-# Tableau comparatif
-st.subheader("📋 Tableau comparatif")
-comparison_df = build_comparison_table(df)
-st.dataframe(comparison_df, use_container_width=True)
+        fig.update_layout(
+            title=f"{sheet_name} – Évolution saisonnière",
+            xaxis_title="Jour de l'année",
+            yaxis_title="Stock (MMB)",
+            template="plotly_white"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Tableau comparatif
+        st.markdown("#### 🔍 Comparatif temporel")
+        compare_df = build_comparison_table(df)
+        st.dataframe(compare_df, use_container_width=True)
+        st.markdown("---")
