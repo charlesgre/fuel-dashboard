@@ -9,11 +9,11 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 
 # ============================ CONFIG ============================
-forecast_file = r"\\gvaps1\USR6\CHGE\desktop\Forecast temperatures.xlsx"
-historical_file = r"\\gvaps1\USR6\CHGE\desktop\Fuel desk\CDD\Data temperatures.xlsx"
-
 current_date = datetime.now().strftime('%Y-%m-%d')
-output_pdf_path = f"//gvaps1//USR6//CHGE//desktop//Fuel desk//CDD//weather_report_{current_date}.pdf"
+forecast_file = "CDD/Forecast temperatures.xlsx"
+historical_file = "CDD/Data temperatures.xlsx"
+output_pdf_path = f"CDD/weather_report_{current_date}.pdf"
+
 
 # ======================= HISTORICAL DATA ========================
 df = pd.read_excel(historical_file, skiprows=6, header=None)

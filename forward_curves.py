@@ -220,7 +220,7 @@ def plot_forward_curve(data, index_name):
 def generate_forward_curves_tab():
     st.header("📈 Forward Curves (ARA / Singapore)")
 
-    directory = "L:/SHARED/NEKY/Tullet"
+    directory = "Forward curve ARA-singap/tullet_files"
     with st.spinner("Chargement des données Tullet..."):
         df = process_tullet_files(directory)
 

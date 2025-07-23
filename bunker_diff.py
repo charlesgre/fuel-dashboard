@@ -4,9 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 
 def plot_bunker_price_diffs():
-    today_str = datetime.today().strftime("%Y-%m-%d")
-    base_dir = r"\\gvaps1\USR6\CHGE\desktop\Fuel desk\Bunker prices"
-    excel_path = base_dir + r"\Bunker prices excel.xlsx"
+    excel_path = "Bunker diff/Bunker prices excel.xlsx"
     
     df = pd.read_excel(excel_path)
     df['DATE'] = pd.to_datetime(df['ASSESSDATE'])

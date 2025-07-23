@@ -155,7 +155,7 @@ def plot_us_forward_curve(df, quote):
 def generate_us_forward_curves_tab():
     st.header("📈 US Forward Curves")
 
-    directory = r"\\gvaps1\USR6\CHGE\desktop\Fuel desk\Forward curves\US closure"
+    directory = "Forward curves US/US closure"
     with st.spinner("Chargement des données..."):
         df = load_us_curve_data(directory)
 

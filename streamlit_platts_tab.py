@@ -11,7 +11,7 @@ from datetime import datetime
 def generate_platts_analytics_tab():
     st.header("🧠 Platts Window Analytics")
 
-    excel_path = r"\\gvaps1\USR6\CHGE\desktop\Fuel desk\Windows activity\PLATTS NWE weekly report\Window platts global data.xlsx"
+    excel_path = "Platts window/Window platts global data.xlsx"
     df = pd.read_excel(excel_path, sheet_name="Platts window")
     df['ORDER_DATE'] = pd.to_datetime(df['ORDER_DATE'], errors='coerce')
     df['ORDER_TIME'] = pd.to_datetime(df['ORDER_TIME'], errors='coerce').dt.time

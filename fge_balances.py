@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 
 # Chemin vers le dossier contenant les fichiers Excel
-folder_path = r"\\gvaps1\USR6\CHGE\desktop\Fuel desk\EA vs FGE balance\FGE balances"
+folder_path = "FGE balances"
 
 def get_latest_excel_file():
     excel_files = glob.glob(os.path.join(folder_path, "*.xls*"))
