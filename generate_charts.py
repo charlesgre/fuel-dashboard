@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 
 # ⚠️ Chemin corrigé vers ton fichier Excel
-FILE_PATH = "Prices sheet.xlsx"
+FILE_PATH = "Prices/Prices sheet.xlsx"
 
 # 🎯 Titres ciblés (VGO supprimé)
 target_titles = [
