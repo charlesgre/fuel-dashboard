@@ -178,7 +178,7 @@ def generate_cdd_graphs_plotly(df, cdd_col, name):
         )
 
         if year == 2025:
-            monthly_cdd[6:] = None
+            monthly_cdd[7:] = None
 
         style = get_line_style(year)
         color = style.get('color', 'gray')
@@ -233,7 +233,7 @@ def generate_cdd_graph_2_plotly(df, cdd_col, name):
         .count()
         .reindex(months, fill_value=0)
     )
-    cdd_2025.iloc[5:] = None
+    cdd_2025.iloc[7:] = None
 
     avg_cdd = (
         df[df['Year'].isin(comparison_years) & (df[cdd_col] > 0)]
