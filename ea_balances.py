@@ -7,7 +7,7 @@ import pdfplumber
 import plotly.graph_objects as go
 
 # ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
-PARSER_VERSION = "ea_parser_v15"
+PARSER_VERSION = "ea_parser_v16"
 
 # ---------- Chemins ----------
 REPO_ROOT = Path(__file__).resolve().parent
