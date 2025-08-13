@@ -7,6 +7,7 @@ from forward_curves import generate_forward_curves_tab
 from forward_curves_us import generate_us_forward_curves_tab
 from streamlit_platts_tab import generate_platts_analytics_tab
 from generate_stocks_tab import generate_stocks_tab  # ✅ nouvelle tab importée
+from ea_balances import load_ea_data, plot_ea
 
 from datetime import datetime
 
@@ -16,7 +17,7 @@ st.title("📊 Fuel Dashboard")
 # ✅ Ajout d'une 7ème tab
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 Prices", "⛽ Bunker Diff", "CDD/Temperatures",
-    "FGE balances", "📈 Forward Curves", "Platts Window", "📦 Fuel Stocks"
+    "Balances (FGE / EA)", "📈 Forward Curves", "Platts Window", "📦 Fuel Stocks"
 ])
 
 # === TAB 1: PRICES ===
@@ -71,31 +72,60 @@ with tab3:
             st.plotly_chart(fig, use_container_width=True, key=f"saudi_cdd_{i}")
         col_idx = (col_idx + 1) % 3
 
-# === TAB 4: FGE BALANCES ===
+# === TAB 4: BALANCES (FGE / EA) ===
 with tab4:
-    st.header("FGE Seasonal Balances")
+    st.header("Seasonal Balances – FGE & EA")
 
-    vlsfo_data, hsfo_data = load_fge_balances()
+    # Sélecteur de source (FGE ou EA) en haut de page
+    source = st.radio("Source de données", ["FGE", "EA"], index=0, horizontal=True)
 
-    st.subheader("VLSFO")
-    vlsfo_figs = plot_fge_balances(vlsfo_data, "VLSFO")
-    cols = st.columns(3)
-    col_idx = 0
-    for i, (title, fig) in enumerate(vlsfo_figs.items()):
-        with cols[col_idx]:
-            st.plotly_chart(fig, use_container_width=True)
-        col_idx = (col_idx + 1) % 3
+    if source == "FGE":
+        # --- Comportement identique à avant ---
+        vlsfo_data, hsfo_data = load_fge_balances()
 
-    st.markdown("---")
+        st.subheader("VLSFO (FGE)")
+        vlsfo_figs = plot_fge_balances(vlsfo_data, "VLSFO")
+        cols = st.columns(3)
+        col_idx = 0
+        for i, (title, fig) in enumerate(vlsfo_figs.items()):
+            with cols[col_idx]:
+                st.plotly_chart(fig, use_container_width=True, key=f"fge_vlsfo_{i}")
+            col_idx = (col_idx + 1) % 3
 
-    st.subheader("HSFO")
-    hsfo_figs = plot_fge_balances(hsfo_data, "HSFO")
-    cols = st.columns(3)
-    col_idx = 0
-    for i, (title, fig) in enumerate(hsfo_figs.items()):
-        with cols[col_idx]:
-            st.plotly_chart(fig, use_container_width=True)
-        col_idx = (col_idx + 1) % 3
+        st.markdown("---")
+
+        st.subheader("HSFO (FGE)")
+        hsfo_figs = plot_fge_balances(hsfo_data, "HSFO")
+        cols = st.columns(3)
+        col_idx = 0
+        for i, (title, fig) in enumerate(hsfo_figs.items()):
+            with cols[col_idx]:
+                st.plotly_chart(fig, use_container_width=True, key=f"fge_hsfo_{i}")
+            col_idx = (col_idx + 1) % 3
+
+    else:
+        # --- EA: métrique + grade ---
+        st.subheader("EA (Europe fuel oil – Fig.10)")
+
+        c1, c2, c3 = st.columns([1,1,4])
+        with c1:
+            metric = st.selectbox("Metric", ["Balance", "Demand", "Supply"], index=0)
+        with c2:
+            grade = st.radio("Grade", ["HSFO", "LSFO"], index=0, horizontal=True)
+
+        # Chargement des données EA (dernier PDF)
+        with st.spinner("Chargement EA…"):
+            ea_data = load_ea_data()
+
+        # Figures par pays (2025 vs 2026, Q1–Q4)
+        figs = plot_ea(ea_data, metric=metric, grade=grade)
+
+        cols = st.columns(3)
+        col_idx = 0
+        for i, (title, fig) in enumerate(figs.items()):
+            with cols[col_idx]:
+                st.plotly_chart(fig, use_container_width=True, key=f"ea_{metric}_{grade}_{i}")
+            col_idx = (col_idx + 1) % 3
 
 # === TAB 5: FORWARD CURVES ===
 with tab5:
@@ -118,3 +148,5 @@ with tab6:
 with tab7:
     st.header("📦 Fuel Stocks – Seasonal Charts & Comparisons")
     generate_stocks_tab()
+
+    
