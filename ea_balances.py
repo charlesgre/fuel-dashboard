@@ -239,47 +239,47 @@ def _parse_fig10(pdf_path: Path) -> dict:
     Parser Fig.10 (Europe fuel oil balance by grade) – robuste à l'extraction PDF.
     - Localise la bonne page via _find_fig10_page_text (ignore la Table of figures).
     - Recolle libellés ET chiffres éclatés.
-    - Découpe le texte par pays via ancres de début de ligne (^Netherlands, ^Belgium, ^Italy, ^Total).
-    - Lit 8 valeurs après chaque libellé (Inland, Bunkers, Ref Supply -> HSFO/LSFO, Blending -> HSFO/LSFO).
+    - Découpe le texte par pays (alias: The Netherlands / Europe Total, etc.).
+    - Accepte VLSFO comme alias de LSFO, et diverses variantes des libellés.
     """
     import re
 
     # ---------- helpers communs ----------
+    NUM = r"\(\s*[-–]?\s*[\d\.,\s]+\s*\)|[-–]?\d[\d\.,\s]*|--"  # nombres, parens négatives, tirets unicode
+
     def _tok_to_int(tok: str) -> int:
-        if tok is None:
+        if not tok:
             return 0
-        t = tok.replace(" ", "").replace(",", "")
+        t = tok.replace(" ", "").replace("\u00A0", "")
+        t = t.replace("–", "-").replace("—", "-")
         if t == "--":
             return 0
         neg = False
         if t.startswith("(") and t.endswith(")"):
             neg = True
             t = t[1:-1]
-        t = re.sub(r"[^\d-]", "", t) or "0"
+        # normaliser séparateurs , .
+        t = t.replace(",", "")
+        t = re.sub(r"[^\d\-]", "", t) or "0"
         v = int(t)
-        return -v if neg or tok.strip().startswith("-") else v
+        return -v if neg or tok.strip().startswith(("-", "–", "—")) else v
 
-    NUM = r"\(\s*-?\s*[\d,\s]+\s*\)|-?\d[\d,\s]*|--"  # autorise espaces/parenthèses
-
-    def _fix_tokens(txt: str) -> str:
-        # normalisation + recollage des libellés et des chiffres
+    def _clean_and_repair(txt: str) -> str:
+        # normalisation + recollage
         txt = (txt or "").replace("\u00A0", " ")
         txt = txt.replace("–", "-").replace("—", "-")
         txt = re.sub(r"[ \t]+", " ", txt)
 
-        def squash(token: str, repl: str | None = None) -> str:
-            letters = [c for c in token if c.isalpha()]
-            if not letters:
-                return txt
-            pat = r'(?m)(?<![A-Za-z])' + r'[\s\.]*'.join(map(re.escape, letters)) + r'(?![A-Za-z])'
-            return re.sub(pat, repl or "".join(letters), txt, flags=re.I)
+        # recoller mots espacés (N e t h e r l a n d s, D e m a n d, etc.)
+        txt = _collapse_spaced_words(txt)
 
-        for t in ["Netherlands", "Belgium", "Italy", "Total",
-                  "Demand", "Supply", "Ref. Supply", "Ref Supply",
-                  "Blending", "Inland", "Bunkers", "HSFO", "LSFO"]:
-            txt = squash(t, "Ref Supply" if t in ("Ref. Supply", "Ref Supply") else None)
+        # harmoniser "Ref. Supply" -> "Refinery Supply"
+        txt = re.sub(r"\bRef\.?\s*Supply\b", "Refinery Supply", txt, flags=re.I)
 
-        # recoller les chiffres éclatés
+        # normaliser les grades: LSFO / VLSFO => LSFO; HSFO inchangé
+        txt = re.sub(r"\bVLSFO\b", "LSFO", txt, flags=re.I)
+
+        # recoller chiffres éclatés
         txt = re.sub(r'(?<=\d)\s+(?=\d)', '', txt)  # 1 2 8 -> 128
         txt = re.sub(r'\(\s+', '(', txt)
         txt = re.sub(r'\s+\)', ')', txt)
@@ -288,7 +288,7 @@ def _parse_fig10(pdf_path: Path) -> dict:
         return txt
 
     def _grab8(chunk: str) -> list[int]:
-        # supprime les intitulés de colonnes (Q1 '25 etc.)
+        # retirer éventuelles en-têtes de colonnes (Q1 '24, Q2 '25, etc.)
         c = re.sub(r"Q\s*\d\s*'?\d{2}", " ", chunk, flags=re.I)
         vals = re.findall(NUM, c)
         vals = [_tok_to_int(t) for t in vals[:8]]
@@ -303,17 +303,21 @@ def _parse_fig10(pdf_path: Path) -> dict:
         return rest[:m1.start()] if m1 else rest
 
     # ---------- 1) localiser la bonne page ----------
-    page_text, _ = _find_fig10_page_text(pdf_path)  # ← utilise ta fonction existante
-    page_text = _fix_tokens(page_text)
+    page_text, page_no = _find_fig10_page_text(pdf_path)
+    page_text = _clean_and_repair(page_text)
 
-    # ---------- 2) découper en 4 blocs par pays (ancres tolérantes + fallback) ----------
+    # ---------- 2) découper en 4 blocs par pays ----------
     countries = ["Netherlands", "Belgium", "Italy", "Total"]
-    blocks: dict[str, str] = {}
+    COUNTRY_ALIASES: dict[str, list[str]] = {
+        "Netherlands": [r"Netherlands", r"The\s+Netherlands", r"\bNL\b"],
+        "Belgium":     [r"Belgium", r"\bBE\b"],
+        "Italy":       [r"Italy", r"\bIT\b"],
+        "Total":       [r"Total(?:\s*Europe)?", r"Europe\s*Total", r"EU\s*Total"],
+    }
 
-    # 2a) positions des pays (mot entier, insensible à la casse)
+    # positions trouvées
     hits = []
     for c in countries:
-        # essaie tous les alias pour ce pays
         pos = None
         for pat in COUNTRY_ALIASES[c]:
             m = re.search(rf"(?<![A-Za-z]){pat}(?![A-Za-z])", page_text, flags=re.I)
@@ -323,14 +327,14 @@ def _parse_fig10(pdf_path: Path) -> dict:
         if pos is not None:
             hits.append((c, pos))
 
-
-    if len(hits) >= 2:  # on peut découper par positions
+    blocks: dict[str, str] = {}
+    if len(hits) >= 2:
         hits.sort(key=lambda kv: kv[1])
         for i, (c, pos) in enumerate(hits):
             end = hits[i+1][1] if i+1 < len(hits) else len(page_text)
             blocks[c] = page_text[pos:end]
 
-    # 2b) fallback: s’il manque des pays, on découpe par 4 "Demand"
+    # fallback: découpe grossière par 4 "Demand"
     if len(blocks) < 4:
         spans = [m.start() for m in re.finditer(r"\bDemand\b", page_text, flags=re.I)]
         if len(spans) >= 4:
@@ -338,48 +342,56 @@ def _parse_fig10(pdf_path: Path) -> dict:
             for i in range(4):
                 blocks[countries[i]] = page_text[spans[i]:spans[i+1]]
 
-    if len(blocks) != 4:
-        # Dernier fallback: ne pas bloquer — créer des blocs vides pour les manquants.
-        for c in countries:
-            blocks.setdefault(c, "")
-        print("[EA parser] Avertissement: blocs pays incomplets — fallback zéro appliqué.")
+    # en dernier recours: blocs vides pour ceux manquants
+    for c in countries:
+        blocks.setdefault(c, "")
 
+    # ---------- 3) alias de libellés (Demand/Supply/parts) ----------
+    # on prépare des patrons larges pour les variantes fréquentes dans EA
+    PAT = {
+        "demand":        r"\bDemand\b",
+        "supply":        r"\bSupply\b",
+        "inland":        r"\b(?:Inland|Domestic)\b",
+        "bunkers":       r"\b(?:Bunkers|Marine\s+Bunkers|Marine)\b",
+        "ref_supply":    r"\b(?:Refinery\s*Supply|Refinery\s*Output|Ref\s*Supply)\b",
+        "blending":      r"\b(?:Blending|Blend)\b",
+        "grade_sep":     r"\b(?:HSFO|LSFO)\b",   # LSFO inclut VLSFO via normalisation
+    }
 
-
-    # ---------- 3) extraction par bloc ----------
     out: dict[str, dict] = {}
+
     for c, blk in blocks.items():
-        b = _fix_tokens(blk)
+        b = _clean_and_repair(blk)
 
         # sections
-        demand_sec = _slice_between(b, r"\bDemand\b", r"\bSupply\b")
-        supply_sec = _slice_between(b, r"\bSupply\b", r"(?:Netherlands|Belgium|Italy|Total|Source:)\b")
-
+        demand_sec = _slice_between(b, PAT["demand"], PAT["supply"])
+        supply_sec = _slice_between(b, PAT["supply"], r"(?:Netherlands|Belgium|Italy|Total|Source:)\b")
 
         def demand_grade(grade: str) -> tuple[list[int], list[int]]:
-            seg = _slice_between(demand_sec, rf"\b{grade}\b", r"\b(?:HSFO|LSFO|Supply)\b")
-            inland  = _grab8(_slice_between(seg, r"\bInland\b",  r"\b(?:Bunkers|HSFO|LSFO|Supply)\b"))
-            bunkers = _grab8(_slice_between(seg, r"\bBunkers\b", r"\b(?:Inland|HSFO|LSFO|Supply)\b"))
+            # isole le segment du grade dans Demand jusqu’au prochain grade ou Supply
+            seg = _slice_between(demand_sec, rf"\b{grade}\b", rf"(?:{PAT['grade_sep']}|{PAT['supply']})")
+            inland  = _grab8(_slice_between(seg, PAT["inland"],  rf"(?:{PAT['bunkers']}|{PAT['grade_sep']}|{PAT['supply']})"))
+            bunkers = _grab8(_slice_between(seg, PAT["bunkers"], rf"(?:{PAT['inland']}|{PAT['grade_sep']}|{PAT['supply']})"))
             return inland, bunkers
 
         def supply_grade(grade: str) -> tuple[list[int], list[int]]:
-            ref_blk   = _slice_between(supply_sec, r"\bRef Supply\b", r"\bBlending\b")
-            blend_blk = _slice_between(supply_sec, r"\bBlending\b",   r"(?:Netherlands|Belgium|Italy|Total|Source:)\b")
-            ref_vals   = _grab8(_slice_between(ref_blk,   rf"\b{grade}\b", r"\b(?:HSFO|LSFO|Blending|$)"))
-            blend_vals = _grab8(_slice_between(blend_blk, rf"\b{grade}\b", r"\b(?:HSFO|LSFO|$)"))
+            ref_blk   = _slice_between(supply_sec, PAT["ref_supply"], PAT["blending"])
+            blend_blk = _slice_between(supply_sec, PAT["blending"],   r"(?:Netherlands|Belgium|Italy|Total|Source:)\b")
+            ref_vals   = _grab8(_slice_between(ref_blk,   rf"\b{grade}\b", rf"(?:{PAT['grade_sep']}|{PAT['blending']}|$)"))
+            blend_vals = _grab8(_slice_between(blend_blk, rf"\b{grade}\b", rf"(?:{PAT['grade_sep']}|$)"))
+            # fallback: lignes directes "HSFO ..."/"LSFO ..." dans Supply
             if all(v == 0 for v in ref_vals) and all(v == 0 for v in blend_vals):
-                direct = _slice_between(supply_sec, rf"\b{grade}\b", r"\b(?:HSFO|LSFO|$)")
+                direct = _slice_between(supply_sec, rf"\b{grade}\b", rf"(?:{PAT['grade_sep']}|$)")
                 ref_vals = _grab8(direct); blend_vals = [0]*8
             return ref_vals, blend_vals
 
-
         data_country = {
-            "Balance_total": _grab8(_slice_between(b, rf"{re.escape(c)}\b", r"\bDemand\b")),
+            "Balance_total": _grab8(_slice_between(b, rf"{re.escape(c)}\b", PAT["demand"])),
             "Demand": {}, "Supply": {},
             "Demand_parts": {}, "Supply_parts": {}
         }
 
-        for grade in ("HSFO", "LSFO"):
+        for grade in ("HSFO", "LSFO"):  # LSFO couvre aussi VLSFO (normalisé)
             inl, bun = demand_grade(grade)
             data_country["Demand_parts"][grade] = {"Inland": inl, "Bunkers": bun}
             data_country["Demand"][grade] = [inl[i] + bun[i] for i in range(8)]
@@ -392,9 +404,16 @@ def _parse_fig10(pdf_path: Path) -> dict:
                 (ref_s[i] + blend_s[i]) - (inl[i] + bun[i]) for i in range(8)
             ]
 
+        # petit log pour diagnostiquer si tout est à zéro
+        if all(v == 0 for v in data_country["Demand"]["HSFO"] + data_country["Demand"]["LSFO"]):
+            print(f"[EA parser] Alerte: aucune valeur Demand non nulle pour {c} (page {page_no}).")
+        if all(v == 0 for v in data_country["Supply"]["HSFO"] + data_country["Supply"]["LSFO"]):
+            print(f"[EA parser] Alerte: aucune valeur Supply non nulle pour {c} (page {page_no}).")
+
         out[c] = data_country
 
     return out
+
 
 
 def _to_tidy_dataframe(parsed: dict) -> pd.DataFrame:
