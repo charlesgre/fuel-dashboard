@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 from generate_charts import generate_price_charts
 from bunker_diff import plot_bunker_price_diffs
@@ -8,11 +9,22 @@ from forward_curves_us import generate_us_forward_curves_tab
 from streamlit_platts_tab import generate_platts_analytics_tab
 from generate_stocks_tab import generate_stocks_tab  # ✅ nouvelle tab importée
 from ea_balances import load_ea_data, plot_ea
-
 from datetime import datetime
+
+# --- Cached EA loader ---
+@st.cache_data(show_spinner=False)
+def get_ea_data_cached():
+    from ea_balances import load_ea_data
+    return load_ea_data()
 
 st.set_page_config(page_title="Fuel Dashboard", layout="wide")
 st.title("📊 Fuel Dashboard")
+
+# --- EA PDFs location (configurable) ---
+# priority: Streamlit secrets -> existing env -> Windows UNC fallback (local use)
+EA_DEFAULT = r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\EA balances"
+EA_DIR = st.secrets.get("EA_PDF_DIR", os.getenv("EA_PDF_DIR", EA_DEFAULT))
+os.environ["EA_PDF_DIR"] = EA_DIR
 
 # ✅ Ajout d'une 7ème tab
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
@@ -115,7 +127,14 @@ with tab4:
 
         # Chargement des données EA (dernier PDF)
         with st.spinner("Chargement EA…"):
-            ea_data = load_ea_data()
+            try:
+                ea_data = get_ea_data_cached()
+            except FileNotFoundError as e:
+                st.error(f"Impossible de charger EA: {e}")
+                st.stop()
+            except Exception as e:
+                st.exception(e)
+                st.stop()
 
         # Figures par pays (2025 vs 2026, Q1–Q4)
         figs = plot_ea(ea_data, metric=metric, grade=grade)
