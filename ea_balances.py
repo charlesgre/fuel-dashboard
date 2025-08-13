@@ -1,18 +1,19 @@
-# -------- Config (chemin configurable) --------
+# -------- ea_balances.py (robuste Fig.10) --------
+# -*- coding: utf-8 -*-
 import os, re, glob, platform
 from pathlib import Path
 import pandas as pd
 import pdfplumber
 import plotly.graph_objects as go
 
-# Dossier par défaut = dossier local du projet: "<repo>/EA balances"
+# ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
+PARSER_VERSION = "ea_parser_v7"
+
+# ---------- Chemins ----------
 REPO_ROOT = Path(__file__).resolve().parent
-LOCAL_DEFAULT = REPO_ROOT / "EA balances"
+LOCAL_DEFAULT = REPO_ROOT / "EA balances"   # dossier du repo (Linux-friendly)
 
-# 1) Si EA_PDF_DIR est défini, on l'utilise tel quel
 EA_ENV = os.getenv("EA_PDF_DIR")
-
-# 2) Sinon: Windows -> UNC ; Linux/Mac -> dossier local dans le repo
 if EA_ENV:
     BASE_PDF_DIR = Path(EA_ENV)
 else:
@@ -21,7 +22,7 @@ else:
     else:
         BASE_PDF_DIR = LOCAL_DEFAULT
 
-# Protection: si on n'est PAS sous Windows et que l'env pointe vers un UNC, on rebascule en local
+# Protection: sous Linux/Mac, si l'env pointe par erreur sur un UNC, rebasculer en local
 if platform.system() != "Windows":
     s = str(BASE_PDF_DIR)
     if s.startswith("\\") or s.startswith("//"):
@@ -33,6 +34,25 @@ QUARTERS  = ["Q1", "Q2", "Q3", "Q4"]
 _tok  = r"(\(?-?\d[\d,]*\)?|--)"
 _tok8 = rf"{_tok}\s+{_tok}\s+{_tok}\s+{_tok}\s+{_tok}\s+{_tok}\s+{_tok}\s+{_tok}"
 
+# ---------- Utils texte ----------
+def _norm_text(s: str) -> str:
+    s = s.replace("\u00A0", " ")  # NBSP
+    s = s.replace("–", "-").replace("—", "-")
+    s = re.sub(r"[ \t]+", " ", s)
+    return s
+
+def _collapse_spaced_words(s: str) -> str:
+    """
+    Recolle 'N e t h e r l a n d s' -> 'Netherlands' (sans coller deux mots distincts).
+    Recolle aussi D e m a n d / S u p p l y / I n l a n d / B u n k e r s.
+    """
+    return re.sub(
+        r'(?<![A-Za-z])(?:[A-Za-z]\s+){2,}[A-Za-z](?![A-Za-z])',
+        lambda m: m.group(0).replace(" ", ""),
+        s
+    )
+
+# ---------- Parsing helpers ----------
 def _parse_tok(x: str) -> int:
     x = x.strip()
     if x == "--": return 0
@@ -41,9 +61,8 @@ def _parse_tok(x: str) -> int:
     return int(x)
 
 def _section_slice(block: str, section: str) -> str:
-    """Retourne uniquement la section Demand ou Supply du bloc pays."""
+    """Retourne uniquement la section Demand ou Supply du bloc pays (tolérant aux collages)."""
     if section == "Demand":
-        # pas de \n obligatoire avant Supply (souvent collé/inline)
         m = re.search(r"Demand\s+(.*?)(?:\bSupply\b)", block, flags=re.S | re.I)
     else:
         m = re.search(r"\bSupply\b\s*(.*)$", block, flags=re.S | re.I)
@@ -52,7 +71,7 @@ def _section_slice(block: str, section: str) -> str:
     return m.group(1)
 
 def _demand_grade_slice(demand_text: str, grade: str) -> str:
-    """Isole la partie du grade dans Demand (tolère HSFOInland, etc.)."""
+    """Isole la partie du grade dans Demand (tolère HSFOInland / LSFOInland)."""
     other = "LSFO" if grade == "HSFO" else "HSFO"
     pat = rf"(?<![A-Za-z]){grade}(?:(?![a-z])|(?=[A-Z]))"
     m_start = re.search(pat, demand_text)
@@ -63,7 +82,7 @@ def _demand_grade_slice(demand_text: str, grade: str) -> str:
     return tail[:m_end.start()] if m_end else tail
 
 def _extract_subline(section_text: str, label: str) -> list[int]:
-    m = re.search(rf"\b{label}\b\s+{_tok8}", section_text)
+    m = re.search(rf"\b{label}\b\s+{_tok8}", section_text, flags=re.I)
     if not m: return [0]*8
     return [_parse_tok(v) for v in m.groups()]
 
@@ -102,14 +121,13 @@ def _extract_supply_parts(country_block: str, grade: str):
 
     return ref_vals, blend_vals
 
-
 def _extract_country_balance_agg(page_text: str, country: str) -> list[int]:
-    m = re.search(rf"{re.escape(country)}\s+{_tok8}", page_text)
-    if not m: raise RuntimeError(f"Balance agrégée introuvable pour {country}.")
-    return [_parse_tok(v) for v in m.groups()]
+    # Ne bloque pas l'exécution si non trouvé (met 0)
+    m = re.search(rf"{re.escape(country)}\s+{_tok8}", page_text, flags=re.I)
+    return [_parse_tok(v) for v in m.groups()] if m else [0]*8
 
+# ---------- Fichiers ----------
 def _get_latest_pdf_file() -> Path:
-    # 1) le dossier existe ?
     if not BASE_PDF_DIR.exists():
         raise FileNotFoundError(
             "Répertoire introuvable pour EA PDFs : "
@@ -118,8 +136,6 @@ def _get_latest_pdf_file() -> Path:
             "En environnement Linux/Cloud, le partage UNC Windows n'est pas monté. "
             "Définis EA_PDF_DIR vers un dossier local accessible au runtime."
         )
-
-    # 2) y a-t-il des PDF ?
     pdfs = glob.glob(str(BASE_PDF_DIR / "*.pdf"))
     if not pdfs:
         try:
@@ -130,69 +146,25 @@ def _get_latest_pdf_file() -> Path:
             f"Aucun PDF trouvé dans {BASE_PDF_DIR}\n"
             f"Contenu du dossier (extrait):\n{listing}"
         )
-
     latest = max(pdfs, key=os.path.getmtime)
     return Path(latest)
 
-def _norm_text(s: str) -> str:
-    # Normalise espaces et ponctuations légères pour fiabiliser les regex
-    s = s.replace("\u00A0", " ")  # espace insécable
-    s = s.replace("–", "-").replace("—", "-")
-    s = re.sub(r"[ \t]+", " ", s)
-    return s
-
-def _norm_text(s: str) -> str:
-    # normalise espaces & ponctuation légère
-    s = s.replace("\u00A0", " ")  # NBSP
-    s = s.replace("–", "-").replace("—", "-")
-    s = re.sub(r"[ \t]+", " ", s)
-    return s
-
-def _collapse_spaced_words(s: str) -> str:
+# ---------- Localisation fiable de la vraie page Fig.10 ----------
+def _find_fig10_page_text(pdf_path: Path) -> tuple[str, int]:
     """
-    Recolle les mots quand le PDF a 'N e t h e r l a n d s' -> 'Netherlands'
-    et les libellés 'D e m a n d', 'S u p p l y', 'I n l a n d', 'B u n k e r', etc.
-    NE TOUCHE PAS aux séparations entre mots.
+    Retourne (texte_de_la_page, page_number_1_based) pour la vraie Fig.10.
+    Choisit la page avec le titre + le score max (Demand/Supply + pays),
+    en ignorant la 'Table of figures'.
     """
-    # lettres espacées (>=2 lettres)
-    s = re.sub(
-        r'(?<![A-Za-z])(?:[A-Za-z]\s+){2,}[A-Za-z](?![A-Za-z])',
-        lambda m: m.group(0).replace(" ", ""),
-        s
-    )
-    return s
-
-
-def _parse_fig10(pdf_path: Path) -> dict:
-    import re
-    import pdfplumber
-
-    # --- helpers: normalise + recolle les lettres espacées ---
-    def _norm_text(s: str) -> str:
-        s = s.replace("\u00A0", " ")
-        s = s.replace("–", "-").replace("—", "-")
-        s = re.sub(r"[ \t]+", " ", s)
-        return s
-
-    def _collapse_spaced_words(s: str) -> str:
-        # "N e t h e r l a n d s" -> "Netherlands" (sans coller deux mots distincts)
-        return re.sub(
-            r'(?<![A-Za-z])(?:[A-Za-z]\s+){2,}[A-Za-z](?![A-Za-z])',
-            lambda m: m.group(0).replace(" ", ""),
-            s
-        )
-
     title_re = re.compile(r"Fig\.?\s*10\b.*Europe\s+fuel\s+oil\s+balance", re.I)
-    countries = ["Netherlands", "Belgium", "Italy", "Total"]
+    country_re = re.compile(r"\b(Netherlands|Belgium|Italy|Total)\b", re.I)
 
-    # -------- 1) Trouver la BONNE page Fig.10 --------
-    best_page_text = None
-    best_score = -1
+    best_txt, best_score, best_page_no = None, -1, -1
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
+        for idx, page in enumerate(pdf.pages, start=1):
             # Texte "meilleur effort"
             page_txt = ""
-            for xt in (9, 8, 7, 6, 5, 4, 3, 2):
+            for xt in (10, 9, 8, 7, 6, 5, 4, 3, 2):
                 try:
                     t = page.extract_text(x_tolerance=xt, y_tolerance=xt, layout=True) or ""
                 except TypeError:
@@ -204,103 +176,52 @@ def _parse_fig10(pdf_path: Path) -> dict:
             if not title_re.search(page_txt):
                 continue
             if re.search(r"\bTable\s+of\s+figures\b", page_txt, re.I):
-                # ignore la table des figures
                 continue
 
-            # score = nb de "Demand" + nb de "Supply"
-            score = len(re.findall(r"\bDemand\b", page_txt, re.I)) + \
-                    len(re.findall(r"\bSupply\b", page_txt, re.I))
+            score = len(re.findall(r"\bDemand\b", page_txt, re.I)) \
+                    + len(re.findall(r"\bSupply\b", page_txt, re.I)) \
+                    + 2 * len(country_re.findall(page_txt))  # pays comptent double
 
-            # on garde la page au meilleur score
             if score > best_score:
-                best_score = score
-                best_page_text = page_txt
+                best_score, best_txt, best_page_no = score, page_txt, idx
 
-    if not best_page_text:
-        raise RuntimeError("Fig.10 introuvable: aucune page avec le titre (et pas 'Table of figures').")
+    if best_txt is None:
+        raise RuntimeError("Fig.10 introuvable: aucune page avec le titre (hors 'Table of figures').")
 
-    target_page_text = best_page_text
+    return best_txt, best_page_no
 
-    # -------- 2) Découper en blocs pays (tolérant, comme ton script e-mail) --------
+# (facultatif) Pour afficher dans l’expander de debug
+def fig10_debug_info():
+    p = _get_latest_pdf_file()
+    txt, no = _find_fig10_page_text(p)
+    return {"pdf": p.name, "fig10_page": no, "chars": len(txt), "parser": PARSER_VERSION}
+
+# ---------- Parse principal ----------
+def _parse_fig10(pdf_path: Path) -> dict:
+    # 1) Vraie page Fig.10
+    target_page_text, _page_no = _find_fig10_page_text(pdf_path)
+
+    # 2) Découpe en blocs pays — logique "script email" + garde-fous
     patterns = {}
-    for c in countries:
-        next_keywords = [k for k in countries if k != c]
+    for c in COUNTRIES:
+        next_keywords = [k for k in COUNTRIES if k != c]
         end_pat = r"(?:" + r"|".join(map(re.escape, next_keywords + ["Source", "Notes"])) + r")"
         m = re.search(rf"{re.escape(c)}[\s\S]*?(?={end_pat})", target_page_text, flags=re.I)
         if m:
             patterns[c] = m.group(0)
         else:
-            # si c est le dernier (ex. 'Total' tout en bas), prends jusqu'à la fin
             m_tail = re.search(rf"{re.escape(c)}[\s\S]*$", target_page_text, flags=re.I)
             if m_tail:
                 patterns[c] = m_tail.group(0)
             else:
-                # 🤏 aide debug : montre un aperçu de la page si un pays manque
                 snippet = target_page_text[:1000]
                 raise RuntimeError(f"Bloc pays introuvable: {c}\n---EXTRAIT PAGE---\n{snippet}\n---------------")
 
-    # -------- 3) Extraction Demand/Supply/Balance (tolérante) --------
-    tok  = r"(\(?-?\d[\d,]*\)?|--)"
-    tok8 = rf"{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}"
-
-    def _parse_tok_local(x: str) -> int:
-        x = x.strip()
-        if x == "--": return 0
-        x = x.replace(",", "")
-        if x.startswith("(") and x.endswith(")"): return -int(x[1:-1])
-        return int(x)
-
-    def _section_slice(block: str, section: str) -> str:
-        if section == "Demand":
-            m = re.search(r"Demand\s+(.*?)(?:\bSupply\b)", block, flags=re.S | re.I)
-        else:
-            m = re.search(r"\bSupply\b\s*(.*)$", block, flags=re.S | re.I)
-        if not m: raise RuntimeError(f"Section '{section}' introuvable.")
-        return m.group(1)
-
-    def _demand_grade_slice(demand_text: str, grade: str) -> str:
-        other = "LSFO" if grade == "HSFO" else "HSFO"
-        pat = rf"(?<![A-Za-z]){grade}(?:(?![a-z])|(?=[A-Z]))"  # tolère HSFOInland
-        m_start = re.search(pat, demand_text)
-        if not m_start: raise RuntimeError(f"Grade '{grade}' introuvable dans Demand.")
-        tail = demand_text[m_start.end():]
-        m_end = re.search(rf"(?<![A-Za-z]){other}(?:(?![a-z])|(?=[A-Z]))", tail)
-        return tail[:m_end.start()] if m_end else tail
-
-    def _extract_subline(section_text: str, label: str) -> list[int]:
-        m = re.search(rf"\b{label}\b\s+{tok8}", section_text, flags=re.I)
-        return [_parse_tok_local(v) for v in m.groups()] if m else [0]*8
-
-    def _extract_supply_parts_block(country_block: str, grade: str):
-        sup = _section_slice(country_block, "Supply")
-        # Ref. Supply ... (jusqu'à Blending, même ligne possible)
-        ref_vals = [0]*8
-        m_ref_blk = re.search(r"Ref\.?\s*Supply\s+(.*?)(?:\bBlending\b|\Z)", sup, flags=re.S | re.I)
-        if m_ref_blk:
-            m_ref = re.search(rf"{grade}\b\s+{tok8}", m_ref_blk.group(1), flags=re.I)
-            if m_ref: ref_vals = [_parse_tok_local(v) for v in m_ref.groups()]
-        # Blending ...
-        blend_vals = [0]*8
-        m_bl_blk = re.search(r"\bBlending\b\s+(.*)$", sup, flags=re.S | re.I)
-        if m_bl_blk:
-            m_bl = re.search(rf"{grade}\b\s+{tok8}", m_bl_blk.group(1), flags=re.I)
-            if m_bl: blend_vals = [_parse_tok_local(v) for v in m_bl.groups()]
-        # Fallback: ligne directe "HSFO ..."/"LSFO ..." dans Supply
-        if all(v == 0 for v in ref_vals) and all(v == 0 for v in blend_vals):
-            m_dir = re.search(rf"^\s*{grade}\b\s+{tok8}", sup, flags=re.M | re.I)
-            if m_dir:
-                ref_vals = [_parse_tok_local(v) for v in m_dir.groups()]
-                blend_vals = [0]*8
-        return ref_vals, blend_vals
-
-    def _extract_country_balance_agg_local(page_text: str, country: str) -> list[int]:
-        m = re.search(rf"{re.escape(country)}\s+{tok8}", page_text)
-        return [_parse_tok_local(v) for v in m.groups()] if m else [0]*8
-
+    # 3) Extraction Demand / Supply / Balance (tolérante)
     data = {}
     for c, block in patterns.items():
         d = {}
-        d["Balance_total"] = _extract_country_balance_agg_local(target_page_text, c)
+        d["Balance_total"] = _extract_country_balance_agg(target_page_text, c)
         d["Demand"] = {}
         d["Supply"] = {}
         d["Demand_parts"] = {}
@@ -316,7 +237,7 @@ def _parse_fig10(pdf_path: Path) -> dict:
             d["Demand"][grade] = [inland[i] + bunkers[i] for i in range(8)]
 
             # SUPPLY
-            ref_s, blend_s = _extract_supply_parts_block(block, grade)
+            ref_s, blend_s = _extract_supply_parts(block, grade)
             d["Supply_parts"][grade] = {"Ref": ref_s, "Blend": blend_s}
             d["Supply"][grade] = [ref_s[i] + blend_s[i] for i in range(8)]
 
@@ -328,7 +249,6 @@ def _parse_fig10(pdf_path: Path) -> dict:
         data[c] = d
 
     return data
-
 
 def _to_tidy_dataframe(parsed: dict) -> pd.DataFrame:
     rows = []
