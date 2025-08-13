@@ -14,6 +14,18 @@ from streamlit_platts_tab import generate_platts_analytics_tab
 from generate_stocks_tab import generate_stocks_tab
 from datetime import datetime
 
+# juste après tes imports, définis une version de cache :
+EA_CACHE_BUSTER = "ea_v9"  # change si tu modifies le parseur
+
+# ...
+from ea_balances import load_ea_data as _load_ea_data, plot_ea  # noqa: E402
+
+@st.cache_data(show_spinner=False)
+def get_ea_data_cached(_buster: str):
+    return _load_ea_data()
+
+# plus bas, quand tu appelles:
+ea_data = get_ea_data_cached(EA_CACHE_BUSTER)
 st.set_page_config(page_title="Fuel Dashboard", layout="wide")
 st.title("📊 Fuel Dashboard")
 
