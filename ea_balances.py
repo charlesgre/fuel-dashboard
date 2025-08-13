@@ -7,7 +7,7 @@ import pdfplumber
 import plotly.graph_objects as go
 
 # ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
-PARSER_VERSION = "ea_parser_v11"
+PARSER_VERSION = "ea_parser_v12"
 
 # ---------- Chemins ----------
 REPO_ROOT = Path(__file__).resolve().parent
@@ -262,27 +262,35 @@ def _parse_fig10(pdf_path: Path) -> dict:
     page_text, _ = _find_fig10_page_text(pdf_path)  # ← utilise ta fonction existante
     page_text = _fix_tokens(page_text)
 
-    # ---------- 2) découper en 4 blocs par pays (ancres de début de ligne) ----------
+    # ---------- 2) découper en 4 blocs par pays (ancres tolérantes + fallback) ----------
     countries = ["Netherlands", "Belgium", "Italy", "Total"]
     blocks: dict[str, str] = {}
-    for i, c in enumerate(countries):
-        start = rf"(?m)^{re.escape(c)}\b"
-        if i < len(countries)-1:
-            nxt = rf"(?m)^(?:{re.escape(countries[i+1])}|Source:)\b"
-        else:
-            nxt = rf"(?m)^Source:\b"
-        blk = _slice_between(page_text, start, nxt)
-        if not blk:
-            # dernier recours: jusqu'à la fin si 'Source:' absent
-            m = re.search(start, page_text, flags=re.M|re.I)
-            if m:
-                blocks[c] = page_text[m.start():]
-        else:
-            blocks[c] = c + "\n" + blk  # on garde le nom en tête de bloc
+
+    # 2a) positions des pays (mot entier, insensible à la casse)
+    hits = []
+    for c in countries:
+        m = re.search(rf"(?<![A-Za-z]){re.escape(c)}(?![A-Za-z])", page_text, flags=re.I)
+        if m:
+            hits.append((c, m.start()))
+
+    if len(hits) >= 2:  # on peut découper par positions
+        hits.sort(key=lambda kv: kv[1])
+        for i, (c, pos) in enumerate(hits):
+            end = hits[i+1][1] if i+1 < len(hits) else len(page_text)
+            blocks[c] = page_text[pos:end]
+
+    # 2b) fallback: s’il manque des pays, on découpe par 4 "Demand"
+    if len(blocks) < 4:
+        spans = [m.start() for m in re.finditer(r"\bDemand\b", page_text, flags=re.I)]
+        if len(spans) >= 4:
+            spans = spans[:4] + [len(page_text)]
+            for i in range(4):
+                blocks[countries[i]] = page_text[spans[i]:spans[i+1]]
 
     if len(blocks) != 4:
-        # on ne force plus le split par 'Demand' -> on échoue explicitement
         raise RuntimeError("Fig.10: anchors par pays introuvables (Netherlands/Belgium/Italy/Total).")
+
+
 
     # ---------- 3) extraction par bloc ----------
     out: dict[str, dict] = {}
@@ -290,29 +298,29 @@ def _parse_fig10(pdf_path: Path) -> dict:
         b = _fix_tokens(blk)
 
         # sections
-        demand_sec = _slice_between(b, r"(?m)^Demand\b", r"(?m)^Supply\b")
-        supply_sec = _slice_between(b, r"(?m)^Supply\b", r"(?m)^(?:Netherlands|Belgium|Italy|Total|Source:)\b")
+        demand_sec = _slice_between(b, r"\bDemand\b", r"\bSupply\b")
+        supply_sec = _slice_between(b, r"\bSupply\b", r"(?:Netherlands|Belgium|Italy|Total|Source:)\b")
+
 
         def demand_grade(grade: str) -> tuple[list[int], list[int]]:
-            seg = _slice_between(demand_sec, rf"(?m)^{grade}\b", rf"(?m)^(?:HSFO|LSFO|Supply)\b")
-            inland  = _grab8(_slice_between(seg, r"(?m)^Inland\b", r"(?m)^(?:Bunkers|HSFO|LSFO|Supply)\b"))
-            bunkers = _grab8(_slice_between(seg, r"(?m)^Bunkers\b", r"(?m)^(?:Inland|HSFO|LSFO|Supply)\b"))
+            seg = _slice_between(demand_sec, rf"\b{grade}\b", r"\b(?:HSFO|LSFO|Supply)\b")
+            inland  = _grab8(_slice_between(seg, r"\bInland\b",  r"\b(?:Bunkers|HSFO|LSFO|Supply)\b"))
+            bunkers = _grab8(_slice_between(seg, r"\bBunkers\b", r"\b(?:Inland|HSFO|LSFO|Supply)\b"))
             return inland, bunkers
 
         def supply_grade(grade: str) -> tuple[list[int], list[int]]:
-            ref_blk   = _slice_between(supply_sec, r"(?m)^Ref Supply\b", r"(?m)^Blending\b")
-            blend_blk = _slice_between(supply_sec, r"(?m)^Blending\b", r"(?m)^(?:Netherlands|Belgium|Italy|Total|Source:)\b")
-            ref_vals   = _grab8(_slice_between(ref_blk, rf"(?m)^{grade}\b", r"(?m)^(?:HSFO|LSFO|Blending|$)"))
-            blend_vals = _grab8(_slice_between(blend_blk, rf"(?m)^{grade}\b", r"(?m)^(?:HSFO|LSFO|$)"))
-            # fallback: parfois les grades sont directement listés sous Supply
+            ref_blk   = _slice_between(supply_sec, r"\bRef Supply\b", r"\bBlending\b")
+            blend_blk = _slice_between(supply_sec, r"\bBlending\b",   r"(?:Netherlands|Belgium|Italy|Total|Source:)\b")
+            ref_vals   = _grab8(_slice_between(ref_blk,   rf"\b{grade}\b", r"\b(?:HSFO|LSFO|Blending|$)"))
+            blend_vals = _grab8(_slice_between(blend_blk, rf"\b{grade}\b", r"\b(?:HSFO|LSFO|$)"))
             if all(v == 0 for v in ref_vals) and all(v == 0 for v in blend_vals):
-                direct = _slice_between(supply_sec, rf"(?m)^{grade}\b", r"(?m)^(?:HSFO|LSFO|$)")
-                ref_vals = _grab8(direct)
-                blend_vals = [0]*8
+                direct = _slice_between(supply_sec, rf"\b{grade}\b", r"\b(?:HSFO|LSFO|$)")
+                ref_vals = _grab8(direct); blend_vals = [0]*8
             return ref_vals, blend_vals
 
+
         data_country = {
-            "Balance_total": _grab8(_slice_between(b, rf"(?m)^{re.escape(c)}\b", r"(?m)^Demand\b")),
+            "Balance_total": _grab8(_slice_between(b, rf"{re.escape(c)}\b", r"\bDemand\b")),
             "Demand": {}, "Supply": {},
             "Demand_parts": {}, "Supply_parts": {}
         }
