@@ -7,7 +7,7 @@ import pdfplumber
 import plotly.graph_objects as go
 
 # ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
-PARSER_VERSION = "ea_parser_v7"
+PARSER_VERSION = "ea_parser_v8"   # ← nouveau
 
 # ---------- Chemins ----------
 REPO_ROOT = Path(__file__).resolve().parent
@@ -192,11 +192,12 @@ def _find_fig10_page_text(pdf_path: Path) -> tuple[str, int]:
 
 def _parse_fig10(pdf_path: Path) -> dict:
     """
-    Robust parser calqué sur ton script e-mail, avec une étape clé:
-    - Recolle explicitement les libellés éclatés caractère par caractère
-      (Netherlands, Belgium, Italy, Total, Demand, Supply, Inland, Bunkers,
-       Ref. Supply/Ref Supply, Blending, HSFO, LSFO) dans le texte extrait.
-    - Puis on applique la même découpe et les mêmes regex que l’e-mail.
+    Parser Fig.10 robuste (aligné sur ton script e-mail) :
+      1) trouve la page via extract_text() simple et le titre "Fig 10: Europe fuel oil balance by grade"
+         (+ fallback tolérant),
+      2) recolle libellés ET chiffres éclatés (Netherlands, Demand, Ref. Supply, 1 2 8 -> 128, etc.),
+      3) découpe la page en 4 blocs (ancres pays, sinon 4 occurrences de 'Demand'),
+      4) extrait Demand / Supply / Balance avec les mêmes regex que l’e-mail.
     """
     import re
     import pdfplumber
@@ -205,19 +206,28 @@ def _parse_fig10(pdf_path: Path) -> dict:
     tok  = r"(\(?-?\d[\d,]*\)?|--)"
     tok8 = rf"{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}"
 
-    # --- helpers numériques locaux (identiques à ton e-mail) ---
+    # ------------------------
+    # Helpers numériques (e-mail)
+    # ------------------------
     def _parse_tok_local(x: str) -> int:
         x = x.strip()
-        if x == "--": return 0
+        if x == "--":
+            return 0
         x = x.replace(",", "")
-        if x.startswith("(") and x.endswith(")"): return -int(x[1:-1])
+        if x.startswith("(") and x.endswith(")"):
+            return -int(x[1:-1])
         return int(x)
 
     def _section_slice_local(block: str, section: str) -> str:
+        # version e-mail (avec \n) + fallback tolérant si Demand/Supply sont collés
         if section == "Demand":
             m = re.search(r"Demand\s+(.*?)(?:\n\s*Supply\b)", block, flags=re.S)
+            if not m:
+                m = re.search(r"Demand\s+(.*?)(?:\bSupply\b)", block, flags=re.S)
         else:
             m = re.search(r"\bSupply\s+(.*)$", block, flags=re.S)
+            if not m:
+                m = re.search(r"\bSupply\b\s*(.*)$", block, flags=re.S)
         if not m:
             raise RuntimeError(f"Section '{section}' introuvable.")
         return m.group(1)
@@ -233,7 +243,7 @@ def _parse_fig10(pdf_path: Path) -> dict:
 
     def _extract_subline_local(section_text: str, label: str) -> list[int]:
         m = re.search(rf"\b{label}\b\s+{tok8}", section_text)
-        return [_parse_tok_local(v) for v in m.groups()] if m else [0]*8
+        return [_parse_tok_local(v) for v in m.groups()] if m else [0] * 8
 
     def _extract_demand_parts_local(country_block: str, grade: str):
         dem = _section_slice_local(country_block, "Demand")
@@ -244,39 +254,41 @@ def _parse_fig10(pdf_path: Path) -> dict:
 
     def _extract_supply_parts_local(country_block: str, grade: str):
         sup = _section_slice_local(country_block, "Supply")
-        # Ref. Supply {grade}
-        ref_vals = [0]*8
+
+        # Ref. Supply {grade} (jusqu'à Blending)
+        ref_vals = [0] * 8
         m_ref_blk = re.search(r"Ref\.?\s*Supply\s+(.*?)(?:\n\s*Blending\b|\Z)", sup, flags=re.S)
         if m_ref_blk:
             m_ref = re.search(rf"{grade}\b\s+{tok8}", m_ref_blk.group(1))
             if m_ref:
                 ref_vals = [_parse_tok_local(v) for v in m_ref.groups()]
+
         # Blending {grade}
-        blend_vals = [0]*8
+        blend_vals = [0] * 8
         m_bl_blk = re.search(r"\bBlending\s+(.*)$", sup, flags=re.S)
         if m_bl_blk:
             m_bl = re.search(rf"{grade}\b\s+{tok8}", m_bl_blk.group(1))
             if m_bl:
                 blend_vals = [_parse_tok_local(v) for v in m_bl.groups()]
-        # Fallback direct line
+
+        # Fallback: ligne directe "HSFO ..."/"LSFO ..." dans Supply
         if all(v == 0 for v in ref_vals) and all(v == 0 for v in blend_vals):
             m_dir = re.search(rf"^\s*{grade}\b\s+{tok8}", sup, flags=re.M)
             if m_dir:
                 ref_vals = [_parse_tok_local(v) for v in m_dir.groups()]
-                blend_vals = [0]*8
+                blend_vals = [0] * 8
+
         return ref_vals, blend_vals
 
     def _extract_country_balance_agg_local(page_text: str, country: str) -> list[int]:
         m = re.search(rf"{re.escape(country)}\s+{tok8}", page_text)
-        return [_parse_tok_local(v) for v in m.groups()] if m else [0]*8
+        return [_parse_tok_local(v) for v in m.groups()] if m else [0] * 8
 
-    # --- (A) EXTRA: recollage agressif des libellés éclatés ---
-    def _squash_token(txt: str, token: str, replacement: str | None = None) -> str:
-        """
-        Recolle un token dont les lettres peuvent être séparées par espaces/retours/dots.
-        Ex: 'N e t h e r l a n d s' -> 'Netherlands'
-            'R e f .   S u p p l y' -> 'Ref Supply'
-        """
+    # ------------------------
+    # Fix texte (recolle libellés ET chiffres éclatés)
+    # ------------------------
+    def _squash_token_once(txt: str, token: str, replacement: str | None = None) -> str:
+        # 'N e t h e r l a n d s' -> 'Netherlands', 'R e f .  S u p p l y' -> 'Ref Supply'
         letters = [c for c in token if c.isalpha()]
         if not letters:
             return txt
@@ -285,22 +297,29 @@ def _parse_fig10(pdf_path: Path) -> dict:
         return re.sub(pat, repl, txt, flags=re.I)
 
     def _fix_tokens(txt: str) -> str:
-        # d’abord normaliser les espaces basiques
-        txt = txt.replace("\u00A0", " ")
+        # normalisation
+        txt = (txt or "").replace("\u00A0", " ")
         txt = re.sub(r"[ \t]+", " ", txt)
 
-        # recoller tous les libellés critiques
+        # libellés clés
         for t in ["Netherlands", "Belgium", "Italy", "Total",
                   "Demand", "Supply", "Inland", "Bunkers",
                   "Blending", "HSFO", "LSFO"]:
-            txt = _squash_token(txt, t)
+            txt = _squash_token_once(txt, t)
+        txt = _squash_token_once(txt, "Ref. Supply", "Ref Supply")
+        txt = _squash_token_once(txt, "Ref Supply", "Ref Supply")
 
-        # 'Ref. Supply' / 'Ref Supply' -> 'Ref Supply'
-        txt = _squash_token(txt, "Ref. Supply", "Ref Supply")
-        txt = _squash_token(txt, "Ref Supply", "Ref Supply")
+        # chiffres éclatés : '1 2 8' -> '128' ; '( 5 3 )' -> '(53)'
+        txt = re.sub(r'(?<=\d)\s+(?=\d)', '', txt)
+        txt = re.sub(r'\(\s+', '(', txt)
+        txt = re.sub(r'\s+\)', ')', txt)
+        txt = re.sub(r'-\s+', '-', txt)
+        txt = re.sub(r'\s*,\s*', ',', txt)
         return txt
 
-    # --- 1) Localiser la page Fig.10 exactement comme ton e-mail ---
+    # ------------------------
+    # 1) Localiser la page (comme l’e-mail)
+    # ------------------------
     target_page_text = None
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -309,7 +328,7 @@ def _parse_fig10(pdf_path: Path) -> dict:
                 target_page_text = _fix_tokens(raw)
                 break
     if not target_page_text:
-        # fallback permissif (majuscules/espaces variables)
+        # fallback tolérant
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
                 raw = page.extract_text() or ""
@@ -319,8 +338,10 @@ def _parse_fig10(pdf_path: Path) -> dict:
     if not target_page_text:
         raise RuntimeError("Fig.10 not found in the PDF (méthode e-mail + fix tokens).")
 
-    # --- 2) Découper PAR PAYS exactement comme l’e-mail ---
-    patterns = {}
+    # ------------------------
+    # 2) Découper PAR PAYS (ancres), sinon fallback sur 4 'Demand'
+    # ------------------------
+    patterns: dict[str, str] = {}
     for c in countries:
         next_keywords = [k for k in countries if k != c]
         end_pat = r"(?:" + r"|".join(map(re.escape, next_keywords + ["Source:"])) + r")"
@@ -328,30 +349,29 @@ def _parse_fig10(pdf_path: Path) -> dict:
         if m:
             patterns[c] = m.group(0)
         else:
-            # si le dernier n'est pas suivi, aller jusqu'à la fin
+            # dernier bloc possible jusqu'à la fin
             m_tail = re.search(rf"{re.escape(c)}[\s\S]*$", target_page_text)
             if m_tail:
                 patterns[c] = m_tail.group(0)
 
-    # --- 3) Fallback si < 4 blocs: découpe par 4 fois "Demand" après fix ---
     if len(patterns) < 4:
-        demand_spans = [m.start() for m in re.finditer(r"\bDemand\b", target_page_text)]
-        if len(demand_spans) >= 4:
-            demand_spans = demand_spans[:4]
-            demand_spans.append(len(target_page_text))
+        spans = [m.start() for m in re.finditer(r"\bDemand\b", target_page_text)]
+        if len(spans) >= 4:
+            spans = spans[:4] + [len(target_page_text)]
             for i in range(4):
-                start, end = demand_spans[i], demand_spans[i+1]
-                patterns[countries[i]] = target_page_text[start:end]
+                patterns[countries[i]] = target_page_text[spans[i]:spans[i+1]]
         else:
             snippet = target_page_text[:1000]
-            raise RuntimeError(
-                "Impossible de découper Fig.10: ni ancres pays ni 4 'Demand' après fix.\n"
-                f"EXTRAIT:\n{snippet}"
-            )
+            raise RuntimeError("Impossible de découper Fig.10: ni ancres pays ni 4 'Demand' après fix.\n"
+                               f"EXTRAIT:\n{snippet}")
 
-    # --- 4) Extraction numérique identique à l’e-mail ---
-    data = {}
-    for c, block in patterns.items():
+    # ------------------------
+    # 3) Extraction numérique (identique e-mail) – avec fix par bloc
+    # ------------------------
+    data: dict[str, dict] = {}
+    for c, raw_block in patterns.items():
+        block = _fix_tokens(raw_block)  # recolle libellés+chiffres *dans* le bloc avant regex
+
         d = {}
         d["Balance_total"] = _extract_country_balance_agg_local(target_page_text, c)
         d["Demand"] = {}
@@ -360,14 +380,17 @@ def _parse_fig10(pdf_path: Path) -> dict:
         d["Supply_parts"] = {}
 
         for grade in ["HSFO", "LSFO"]:
+            # DEMAND
             inland_d, bunkers_d = _extract_demand_parts_local(block, grade)
             d["Demand_parts"][grade] = {"Inland": inland_d, "Bunkers": bunkers_d}
             d["Demand"][grade] = [inland_d[i] + bunkers_d[i] for i in range(8)]
 
+            # SUPPLY
             ref_s, blend_s = _extract_supply_parts_local(block, grade)
             d["Supply_parts"][grade] = {"Ref": ref_s, "Blend": blend_s}
             d["Supply"][grade] = [ref_s[i] + blend_s[i] for i in range(8)]
 
+            # BALANCE (grade)
             d[f"Balance_{grade}"] = [
                 (ref_s[i] + blend_s[i]) - (inland_d[i] + bunkers_d[i]) for i in range(8)
             ]
@@ -375,7 +398,6 @@ def _parse_fig10(pdf_path: Path) -> dict:
         data[c] = d
 
     return data
-
 
 def _to_tidy_dataframe(parsed: dict) -> pd.DataFrame:
     rows = []
