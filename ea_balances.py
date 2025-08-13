@@ -153,42 +153,77 @@ def _get_latest_pdf_file() -> Path:
 def _find_fig10_page_text(pdf_path: Path) -> tuple[str, int]:
     """
     Retourne (texte_de_la_page, page_number_1_based) pour la vraie Fig.10.
-    Choisit la page avec le titre + le score max (Demand/Supply + pays),
-    en ignorant la 'Table of figures'.
+
+    1) Parcourt toutes les pages qui contiennent le titre "Fig 10: Europe fuel oil balance"
+       et IGNORE TOUTES les variantes de "Table of figures" (y compris lettres espacées).
+    2) Score: Demand/Supply + pays -> on garde la meilleure.
+    3) Fallback: on lit la page "Table of figures" pour extraire le numéro de page de Fig.10
+       (ex: '... kb/d  9') et on ouvre directement cette page.
     """
+    import pdfplumber, re
+
+    def _clean(s: str) -> str:
+        # même normalisation que ton code
+        s = _collapse_spaced_words(_norm_text(s or ""))
+        return s
+
+    # titre Fig.10
     title_re = re.compile(r"Fig\.?\s*10\b.*Europe\s+fuel\s+oil\s+balance", re.I)
-    country_re = re.compile(r"\b(Netherlands|Belgium|Italy|Total)\b", re.I)
+    # détection robuste du libellé "Table of figures" même si lettres espaçées
+    tof_re = re.compile(r"t\s*a\s*b\s*l\s*e\s+o\s*f\s+f\s*i\s*g\s*u\s*r\s*e\s*s", re.I)
+
+    countries = ("Netherlands", "Belgium", "Italy", "Total")
 
     best_txt, best_score, best_page_no = None, -1, -1
+
     with pdfplumber.open(pdf_path) as pdf:
+        # --- 1) pages candidates avec le titre (en ignorant la table des figures) ---
         for idx, page in enumerate(pdf.pages, start=1):
-            # Texte "meilleur effort"
-            page_txt = ""
-            for xt in (10, 9, 8, 7, 6, 5, 4, 3, 2):
-                try:
-                    t = page.extract_text(x_tolerance=xt, y_tolerance=xt, layout=True) or ""
-                except TypeError:
-                    t = page.extract_text(layout=True) or page.extract_text() or ""
-                t = _collapse_spaced_words(_norm_text(t))
-                if len(t) > len(page_txt):
-                    page_txt = t
+            try:
+                t = page.extract_text(x_tolerance=8, y_tolerance=8, layout=True) or ""
+            except TypeError:
+                t = page.extract_text() or ""
+            t = _clean(t)
 
-            if not title_re.search(page_txt):
+            if not title_re.search(t):
                 continue
-            if re.search(r"\bTable\s+of\s+figures\b", page_txt, re.I):
+            if tof_re.search(t):  # ignorer *toutes* les variantes "Table of figures"
                 continue
 
-            score = len(re.findall(r"\bDemand\b", page_txt, re.I)) \
-                    + len(re.findall(r"\bSupply\b", page_txt, re.I)) \
-                    + 2 * len(country_re.findall(page_txt))  # pays comptent double
+            score = (
+                len(re.findall(r"\bDemand\b", t, re.I))
+                + len(re.findall(r"\bSupply\b", t, re.I))
+                + 2 * sum(bool(re.search(rf"\b{c}\b", t, re.I)) for c in countries)
+            )
 
             if score > best_score:
-                best_score, best_txt, best_page_no = score, page_txt, idx
+                best_txt, best_score, best_page_no = t, score, idx
 
-    if best_txt is None:
-        raise RuntimeError("Fig.10 introuvable: aucune page avec le titre (hors 'Table of figures').")
+        if best_txt:
+            return best_txt, best_page_no
 
-    return best_txt, best_page_no
+        # --- 2) Fallback: prendre le numéro dans la Table of figures ---
+        tof_page_no = None
+        tof_text = ""
+        for idx, page in enumerate(pdf.pages, start=1):
+            t = _clean(page.extract_text() or "")
+            if tof_re.search(t):
+                tof_text = t
+                m = re.search(r"Fig\s*10:.*?(\d{1,3})\s*$", t, re.I | re.M)
+                if m:
+                    tof_page_no = int(m.group(1))
+                break
+
+        if tof_page_no and 1 <= tof_page_no <= len(pdf.pages):
+            # ouvrir directement la page annoncée (ex: 9)
+            try:
+                t = pdf.pages[tof_page_no - 1].extract_text(x_tolerance=8, y_tolerance=8, layout=True) or ""
+            except TypeError:
+                t = pdf.pages[tof_page_no - 1].extract_text() or ""
+            return _clean(t), tof_page_no
+
+    raise RuntimeError("Fig.10 introuvable: ni page avec le titre, ni Table of figures exploitable.")
+
 
 def _parse_fig10(pdf_path: Path) -> dict:
     """
