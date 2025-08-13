@@ -164,8 +164,10 @@ def _collapse_spaced_words(s: str) -> str:
 
 
 def _parse_fig10(pdf_path: Path) -> dict:
+    import re
     import pdfplumber
 
+    # --- helpers: normalise + "re-collage" of spaced letters ---
     def _norm_text(s: str) -> str:
         s = s.replace("\u00A0", " ")
         s = s.replace("–", "-").replace("—", "-")
@@ -173,19 +175,23 @@ def _parse_fig10(pdf_path: Path) -> dict:
         return s
 
     def _collapse_spaced_words(s: str) -> str:
-        # Recolle 'N e t h e r l a n d s' -> 'Netherlands' sans coller les mots entre eux
+        # "N e t h e r l a n d s" -> "Netherlands", without gluing separate words
         return re.sub(
             r'(?<![A-Za-z])(?:[A-Za-z]\s+){2,}[A-Za-z](?![A-Za-z])',
             lambda m: m.group(0).replace(" ", ""),
             s
         )
 
-    # 1) Localiser la page Fig.10 (permissif)
+    # Title to detect Fig.10, but avoid the "Table of figures" page
     title_re = re.compile(r"Fig\.?\s*10\b.*Europe\s+fuel\s+oil\s+balance", re.I)
+    countries = ["Netherlands", "Belgium", "Italy", "Total"]
+
+    # --- 1) Find the REAL Fig.10 page (not the Table of figures entry) ---
     target_page_text = None
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             best = ""
+            # try several tolerances to "glue" letters
             for xt in (8, 7, 6, 5, 4, 3, 2):
                 try:
                     t = page.extract_text(x_tolerance=xt, y_tolerance=xt, layout=True) or ""
@@ -194,15 +200,21 @@ def _parse_fig10(pdf_path: Path) -> dict:
                 t = _collapse_spaced_words(_norm_text(t))
                 if len(t) > len(best):
                     best = t
+
+            # must contain the Fig.10 title AND at least 2 of the 4 country names
             if title_re.search(best):
-                target_page_text = best
-                break
+                # skip Table of figures pages that only list titles
+                if re.search(r"\bTable\s+of\s+figures\b", best, re.I):
+                    continue
+                hit_count = sum(1 for c in countries if re.search(rf"(?<![A-Za-z]){re.escape(c)}(?![a-z])", best, re.I))
+                if hit_count >= 2:
+                    target_page_text = best
+                    break
 
     if not target_page_text:
-        raise RuntimeError("Fig.10 introuvable (titre non détecté).")
+        raise RuntimeError("Fig.10 introuvable: aucune page avec le titre ET des pays (Netherlands/Belgium/Italy/Total).")
 
-    # 2) Découpe en blocs pays — EXACTEMENT comme dans ton script email
-    countries = ["Netherlands", "Belgium", "Italy", "Total"]
+    # --- 2) Split into country blocks, tolerant like your email script ---
     patterns = {}
     for c in countries:
         next_keywords = [k for k in countries if k != c]
@@ -211,14 +223,14 @@ def _parse_fig10(pdf_path: Path) -> dict:
         if m:
             patterns[c] = m.group(0)
         else:
-            # si c est le dernier (ex. 'Total' tout en bas), prends jusqu'à la fin
+            # if it's the last block (e.g. "Total" at bottom), take to end
             m_tail = re.search(rf"{re.escape(c)}[\s\S]*$", target_page_text, flags=re.I)
             if m_tail:
                 patterns[c] = m_tail.group(0)
             else:
                 raise RuntimeError(f"Bloc pays introuvable: {c}")
 
-    # 3) Extraction identique au script email (adapté aux collages)
+    # --- 3) Extract data (Demand/Supply/Balance) — tolerant to inline labels ---
     tok  = r"(\(?-?\d[\d,]*\)?|--)"
     tok8 = rf"{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}"
 
@@ -226,11 +238,58 @@ def _parse_fig10(pdf_path: Path) -> dict:
         x = x.strip()
         if x == "--": return 0
         x = x.replace(",", "")
-        if x.startswith("(") and x.endswith(")"): return -int(x[1:-1])
+        if x.startswith("(") and x.endswith(")"):
+            return -int(x[1:-1])
         return int(x)
 
+    def _section_slice(block: str, section: str) -> str:
+        if section == "Demand":
+            m = re.search(r"Demand\s+(.*?)(?:\bSupply\b)", block, flags=re.S | re.I)
+        else:
+            m = re.search(r"\bSupply\b\s*(.*)$", block, flags=re.S | re.I)
+        if not m:
+            raise RuntimeError(f"Section '{section}' introuvable.")
+        return m.group(1)
+
+    def _demand_grade_slice(demand_text: str, grade: str) -> str:
+        other = "LSFO" if grade == "HSFO" else "HSFO"
+        pat = rf"(?<![A-Za-z]){grade}(?:(?![a-z])|(?=[A-Z]))"  # HSFOInland tolerated
+        m_start = re.search(pat, demand_text)
+        if not m_start:
+            raise RuntimeError(f"Grade '{grade}' introuvable dans Demand.")
+        tail = demand_text[m_start.end():]
+        m_end = re.search(rf"(?<![A-Za-z]){other}(?:(?![a-z])|(?=[A-Z]))", tail)
+        return tail[:m_end.start()] if m_end else tail
+
+    def _extract_subline(section_text: str, label: str) -> list[int]:
+        m = re.search(rf"\b{label}\b\s+{tok8}", section_text, flags=re.I)
+        return [_parse_tok_local(v) for v in m.groups()] if m else [0]*8
+
+    def _extract_supply_parts(country_block: str, grade: str):
+        sup = _section_slice(country_block, "Supply")
+        # Ref. Supply ... (up to Blending, possibly same line)
+        ref_vals = [0]*8
+        m_ref_blk = re.search(r"Ref\.?\s*Supply\s+(.*?)(?:\bBlending\b|\Z)", sup, flags=re.S | re.I)
+        if m_ref_blk:
+            m_ref = re.search(rf"{grade}\b\s+{tok8}", m_ref_blk.group(1), flags=re.I)
+            if m_ref:
+                ref_vals = [_parse_tok_local(v) for v in m_ref.groups()]
+        # Blending ...
+        blend_vals = [0]*8
+        m_bl_blk = re.search(r"\bBlending\b\s+(.*)$", sup, flags=re.S | re.I)
+        if m_bl_blk:
+            m_bl = re.search(rf"{grade}\b\s+{tok8}", m_bl_blk.group(1), flags=re.I)
+            if m_bl:
+                blend_vals = [_parse_tok_local(v) for v in m_bl.groups()]
+        # fallback: direct "HSFO ..."/"LSFO ..." lines inside Supply
+        if all(v == 0 for v in ref_vals) and all(v == 0 for v in blend_vals):
+            m_dir = re.search(rf"^\s*{grade}\b\s+{tok8}", sup, flags=re.M | re.I)
+            if m_dir:
+                ref_vals = [_parse_tok_local(v) for v in m_dir.groups()]
+                blend_vals = [0]*8
+        return ref_vals, blend_vals
+
     def _extract_country_balance_agg_local(page_text: str, country: str) -> list[int]:
-        # la ligne agrégée "Italy 64 57 ..." etc. (si manquante, on met 0)
         m = re.search(rf"{re.escape(country)}\s+{tok8}", page_text)
         return [_parse_tok_local(v) for v in m.groups()] if m else [0]*8
 
@@ -244,22 +303,17 @@ def _parse_fig10(pdf_path: Path) -> dict:
         d["Supply_parts"] = {}
 
         for grade in ["HSFO", "LSFO"]:
-            # DEMAND
             dem = _section_slice(block, "Demand")
             seg = _demand_grade_slice(dem, grade)
-            m_in  = re.search(rf"\bInland\b\s+{tok8}", seg, flags=re.I)
-            m_bn  = re.search(rf"\bBunkers\b\s+{tok8}", seg, flags=re.I)
-            inland  = [_parse_tok_local(v) for v in m_in.groups()]  if m_in  else [0]*8
-            bunkers = [_parse_tok_local(v) for v in m_bn.groups()]  if m_bn  else [0]*8
+            inland  = _extract_subline(seg, "Inland")
+            bunkers = _extract_subline(seg, "Bunkers")
             d["Demand_parts"][grade] = {"Inland": inland, "Bunkers": bunkers}
             d["Demand"][grade] = [inland[i] + bunkers[i] for i in range(8)]
 
-            # SUPPLY (Ref. Supply + Blending)
             ref_s, blend_s = _extract_supply_parts(block, grade)
             d["Supply_parts"][grade] = {"Ref": ref_s, "Blend": blend_s}
             d["Supply"][grade] = [ref_s[i] + blend_s[i] for i in range(8)]
 
-            # BALANCE(grade)
             d[f"Balance_{grade}"] = [
                 (ref_s[i] + blend_s[i]) - (inland[i] + bunkers[i]) for i in range(8)
             ]
