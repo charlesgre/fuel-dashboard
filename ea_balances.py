@@ -191,64 +191,165 @@ def _find_fig10_page_text(pdf_path: Path) -> tuple[str, int]:
     return best_txt, best_page_no
 
 # (facultatif) Pour afficher dans l’expander de debug
-def fig10_debug_info():
-    p = _get_latest_pdf_file()
-    txt, no = _find_fig10_page_text(p)
-    return {"pdf": p.name, "fig10_page": no, "chars": len(txt), "parser": PARSER_VERSION}
-
-# ---------- Parse principal ----------
 def _parse_fig10(pdf_path: Path) -> dict:
-    # 1) Vraie page Fig.10
-    target_page_text, _page_no = _find_fig10_page_text(pdf_path)
+    """
+    1) Sélectionne la page comme dans le script e-mail: .extract_text() simple et
+       recherche du libellé exact "Fig 10: Europe fuel oil balance by grade".
+    2) Tente la découpe par ANCRAGE PAYS (Netherlands, Belgium, Italy, Total).
+    3) Fallback béton si ancrages introuvables: découpe en 4 blocs par positions
+       successives de "Demand" et mappe l'ordre -> [Netherlands, Belgium, Italy, Total].
+    """
+    import re
+    import pdfplumber
 
-    # 2) Découpe en blocs pays — logique "script email" + garde-fous
+    countries = ["Netherlands", "Belgium", "Italy", "Total"]
+    tok  = r"(\(?-?\d[\d,]*\)?|--)"
+    tok8 = rf"{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}"
+
+    # --- 0) Petits helpers locaux (éviter dépendances globales) ---
+    def _parse_tok_local(x: str) -> int:
+        x = x.strip()
+        if x == "--": return 0
+        x = x.replace(",", "")
+        if x.startswith("(") and x.endswith(")"): return -int(x[1:-1])
+        return int(x)
+
+    def _section_slice_local(block: str, section: str) -> str:
+        # même logique que ton mail: Demand ... (newline) Supply
+        if section == "Demand":
+            m = re.search(r"Demand\s+(.*?)(?:\n\s*Supply\b)", block, flags=re.S)
+        else:
+            m = re.search(r"\bSupply\s+(.*)$", block, flags=re.S)
+        if not m:
+            raise RuntimeError(f"Section '{section}' introuvable.")
+        return m.group(1)
+
+    def _demand_grade_slice_local(demand_text: str, grade: str) -> str:
+        other = "LSFO" if grade == "HSFO" else "HSFO"
+        m_start = re.search(rf"\b{grade}\b", demand_text)
+        if not m_start:
+            raise RuntimeError(f"Grade '{grade}' introuvable dans Demand.")
+        tail = demand_text[m_start.end():]
+        m_end = re.search(rf"\b{other}\b", tail)
+        return tail[:m_end.start()] if m_end else tail
+
+    def _extract_subline_local(section_text: str, label: str) -> list[int]:
+        m = re.search(rf"\b{label}\b\s+{tok8}", section_text)
+        return [_parse_tok_local(v) for v in m.groups()] if m else [0]*8
+
+    def _extract_demand_parts_local(country_block: str, grade: str):
+        dem = _section_slice_local(country_block, "Demand")
+        seg = _demand_grade_slice_local(dem, grade)
+        inland  = _extract_subline_local(seg, "Inland")
+        bunkers = _extract_subline_local(seg, "Bunkers")
+        return inland, bunkers
+
+    def _extract_supply_parts_local(country_block: str, grade: str):
+        sup = _section_slice_local(country_block, "Supply")
+        # Ref. Supply {grade} ... (jusqu'à 'Blending' avec saut de ligne)
+        ref_vals = [0]*8
+        m_ref_blk = re.search(r"Ref\.?\s*Supply\s+(.*?)(?:\n\s*Blending\b|\Z)", sup, flags=re.S)
+        if m_ref_blk:
+            m_ref = re.search(rf"{grade}\b\s+{tok8}", m_ref_blk.group(1))
+            if m_ref:
+                ref_vals = [_parse_tok_local(v) for v in m_ref.groups()]
+        # Blending {grade}
+        blend_vals = [0]*8
+        m_bl_blk = re.search(r"\bBlending\s+(.*)$", sup, flags=re.S)
+        if m_bl_blk:
+            m_bl = re.search(rf"{grade}\b\s+{tok8}", m_bl_blk.group(1))
+            if m_bl:
+                blend_vals = [_parse_tok_local(v) for v in m_bl.groups()]
+        # Fallback: ligne directe "HSFO ..."/"LSFO ..." dans Supply
+        if all(v == 0 for v in ref_vals) and all(v == 0 for v in blend_vals):
+            m_dir = re.search(rf"^\s*{grade}\b\s+{tok8}", sup, flags=re.M)
+            if m_dir:
+                ref_vals = [_parse_tok_local(v) for v in m_dir.groups()]
+                blend_vals = [0]*8
+        return ref_vals, blend_vals
+
+    def _extract_country_balance_agg_local(page_text: str, country: str) -> list[int]:
+        m = re.search(rf"{re.escape(country)}\s+{tok8}", page_text)
+        return [_parse_tok_local(v) for v in m.groups()] if m else [0]*8
+
+    # --- 1) Sélection de la page EXACTEMENT comme dans ton script e-mail ---
+    target_page_text = None
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            txt = page.extract_text() or ""  # <- pas de layout, pas de tolérances
+            if "Fig 10: Europe fuel oil balance by grade" in txt:
+                target_page_text = txt
+                break
+    if not target_page_text:
+        # fallback plus permissif pour certains PDFs (espaces/majuscules)
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                txt = page.extract_text() or ""
+                if re.search(r"Fig\s*10:\s*Europe\s+fuel\s+oil\s+balance", txt, flags=re.I):
+                    target_page_text = txt
+                    break
+    if not target_page_text:
+        raise RuntimeError("Fig.10 not found in the PDF (méthode e-mail).")
+
+    # --- 2) Tenter la découpe PAR PAYS (méthode e-mail 1:1) ---
     patterns = {}
-    for c in COUNTRIES:
-        next_keywords = [k for k in COUNTRIES if k != c]
-        end_pat = r"(?:" + r"|".join(map(re.escape, next_keywords + ["Source", "Notes"])) + r")"
-        m = re.search(rf"{re.escape(c)}[\s\S]*?(?={end_pat})", target_page_text, flags=re.I)
+    for c in countries:
+        next_keywords = [k for k in countries if k != c]
+        end_pat = r"(?:" + r"|".join(map(re.escape, next_keywords + ["Source:"])) + r")"
+        m = re.search(rf"{re.escape(c)}[\s\S]*?(?={end_pat})", target_page_text)
         if m:
             patterns[c] = m.group(0)
-        else:
-            m_tail = re.search(rf"{re.escape(c)}[\s\S]*$", target_page_text, flags=re.I)
-            if m_tail:
-                patterns[c] = m_tail.group(0)
-            else:
-                snippet = target_page_text[:1000]
-                raise RuntimeError(f"Bloc pays introuvable: {c}\n---EXTRAIT PAGE---\n{snippet}\n---------------")
 
-    # 3) Extraction Demand / Supply / Balance (tolérante)
+    # --- 3) Fallback béton: découper en 4 blocs en enchaînant les 'Demand' ---
+    if len(patterns) < 4:
+        # On prend le texte brut (comme e-mail) et on découpe sur les positions de "Demand"
+        demand_spans = [m.start() for m in re.finditer(r"\bDemand\b", target_page_text)]
+        if len(demand_spans) >= 4:
+            demand_spans = demand_spans[:4]  # on n'en veut que 4
+            demand_spans.append(len(target_page_text))
+            for i in range(4):
+                start = demand_spans[i]
+                end   = demand_spans[i+1]
+                # On rattache par ordre fixe -> NLD, BEL, ITA, TOTAL
+                patterns[countries[i]] = target_page_text[start:end]
+        else:
+            # Aide debug (tu as remonté ce cas)
+            snippet = target_page_text[:1000]
+            raise RuntimeError(
+                "Impossible de découper Fig.10: ni ancres pays ni 4 'Demand'.\n"
+                f"EXTRAIT:\n{snippet}"
+            )
+
+    # --- 4) Extraction numérique (identique à ton e-mail) ---
     data = {}
     for c, block in patterns.items():
         d = {}
-        d["Balance_total"] = _extract_country_balance_agg(target_page_text, c)
+        d["Balance_total"] = _extract_country_balance_agg_local(target_page_text, c)
         d["Demand"] = {}
         d["Supply"] = {}
         d["Demand_parts"] = {}
         d["Supply_parts"] = {}
 
         for grade in ["HSFO", "LSFO"]:
-            # DEMAND
-            dem = _section_slice(block, "Demand")
-            seg = _demand_grade_slice(dem, grade)
-            inland  = _extract_subline(seg, "Inland")
-            bunkers = _extract_subline(seg, "Bunkers")
-            d["Demand_parts"][grade] = {"Inland": inland, "Bunkers": bunkers}
-            d["Demand"][grade] = [inland[i] + bunkers[i] for i in range(8)]
+            # DEMAND = Inland + Bunkers
+            inland_d, bunkers_d = _extract_demand_parts_local(block, grade)
+            d["Demand_parts"][grade] = {"Inland": inland_d, "Bunkers": bunkers_d}
+            d["Demand"][grade] = [inland_d[i] + bunkers_d[i] for i in range(8)]
 
-            # SUPPLY
-            ref_s, blend_s = _extract_supply_parts(block, grade)
+            # SUPPLY = Ref + Blending (avec fallback 'ligne directe')
+            ref_s, blend_s = _extract_supply_parts_local(block, grade)
             d["Supply_parts"][grade] = {"Ref": ref_s, "Blend": blend_s}
             d["Supply"][grade] = [ref_s[i] + blend_s[i] for i in range(8)]
 
             # BALANCE(grade)
             d[f"Balance_{grade}"] = [
-                (ref_s[i] + blend_s[i]) - (inland[i] + bunkers[i]) for i in range(8)
+                (ref_s[i] + blend_s[i]) - (inland_d[i] + bunkers_d[i]) for i in range(8)
             ]
 
         data[c] = d
 
     return data
+
 
 def _to_tidy_dataframe(parsed: dict) -> pd.DataFrame:
     rows = []
