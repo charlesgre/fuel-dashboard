@@ -2,6 +2,8 @@
 import os
 import platform
 from pathlib import Path
+from datetime import datetime
+
 import streamlit as st
 
 from generate_charts import generate_price_charts
@@ -12,24 +14,12 @@ from forward_curves import generate_forward_curves_tab
 from forward_curves_us import generate_us_forward_curves_tab
 from streamlit_platts_tab import generate_platts_analytics_tab
 from generate_stocks_tab import generate_stocks_tab
-from datetime import datetime
 
-# juste après tes imports, définis une version de cache :
-EA_CACHE_BUSTER = "ea_v9"  # change si tu modifies le parseur
-
-# ...
-from ea_balances import load_ea_data as _load_ea_data, plot_ea  # noqa: E402
-
-@st.cache_data(show_spinner=False)
-def get_ea_data_cached(_buster: str):
-    return _load_ea_data()
-
-# plus bas, quand tu appelles:
-ea_data = get_ea_data_cached(EA_CACHE_BUSTER)
+# ------------ Page config ------------
 st.set_page_config(page_title="Fuel Dashboard", layout="wide")
 st.title("📊 Fuel Dashboard")
 
-# --- EA PDFs location (configure BEFORE importing ea_balances) ---
+# ------------ Config EA_PDF_DIR (doit être fait AVANT d'importer ea_balances) ------------
 repo_root = Path(__file__).resolve().parent
 local_default = repo_root / "EA balances"   # dossier DU REPO (doit exister en prod)
 
@@ -40,7 +30,8 @@ EA_DIR = os.getenv("EA_PDF_DIR", st.secrets.get("EA_PDF_DIR", str(local_default)
 if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startswith("//")):
     EA_DIR = str(local_default)
 
-os.environ["EA_PDF_DIR"] = EA_DIR  # doit être défini avant d'importer ea_balances
+# Expose au runtime pour le parseur
+os.environ["EA_PDF_DIR"] = EA_DIR
 st.caption(f"EA_PDF_DIR utilisé: {EA_DIR}")
 
 # Debug rapide pour voir ce que le runtime voit
@@ -53,15 +44,23 @@ with st.expander("EA debug"):
     except Exception as e:
         st.write("Listing impossible:", e)
 
-# ⚠️ Import après config du path
-from ea_balances import load_ea_data as _load_ea_data, plot_ea  # noqa: E402
+# ⚠️ Import APRÈS config du path
+from ea_balances import (  # noqa: E402
+    load_ea_data as _load_ea_data,
+    plot_ea,
+    PARSER_VERSION,   # utilisé pour clé de cache
+)
 
-# --- Cached EA loader ---
+# ------------ Cache EA dépendant de la version du parseur ------------
 @st.cache_data(show_spinner=False)
-def get_ea_data_cached():
+def get_ea_data_cached(_parser_version: str):
+    """
+    Le paramètre _parser_version est uniquement là pour 'cléer' le cache.
+    Dès que PARSER_VERSION change dans ea_balances.py, le cache est invalidé.
+    """
     return _load_ea_data()
 
-# ✅ Tabs
+# ------------ Tabs ------------
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 Prices", "⛽ Bunker Diff", "CDD/Temperatures",
     "Balances (FGE / EA)", "📈 Forward Curves", "Platts Window", "📦 Fuel Stocks"
@@ -135,15 +134,23 @@ with tab4:
 
     else:
         st.subheader("EA (Europe fuel oil – Fig.10)")
-        c1, c2, _ = st.columns([1,1,4])
+        c1, c2, c3 = st.columns([1, 1, 3])
         with c1:
             metric = st.selectbox("Metric", ["Balance", "Demand", "Supply"], index=0)
         with c2:
             grade = st.radio("Grade", ["HSFO", "LSFO"], index=0, horizontal=True)
+        with c3:
+            if st.button("🔄 Reparser EA (clear cache)"):
+                get_ea_data_cached.clear()
+                try:
+                    st.rerun()
+                except Exception:
+                    st.experimental_rerun()
 
         with st.spinner("Chargement EA…"):
             try:
-                ea_data = get_ea_data_cached()
+                # 👇 le cache dépend de la version du parseur
+                ea_data = get_ea_data_cached(PARSER_VERSION)
             except FileNotFoundError as e:
                 st.error(f"EA_PDF_DIR: {EA_DIR}\n{e}")
                 st.stop()
