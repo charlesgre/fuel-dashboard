@@ -86,8 +86,31 @@ with tab2:
 # === TAB 3: CDD / TEMPERATURES ===
 with tab3:
     st.header("CDD / Temperatures")
-    figures = get_all_cdd_figures()
+
+    # import paresseux + debug propre
+    try:
+        from cdd_temperatures import get_all_cdd_figures
+    except ModuleNotFoundError as e:
+        st.error("Le module 'cdd_temperatures' est introuvable.")
+        with st.expander("Détails de l'erreur"):
+            st.exception(e)
+        st.stop()
+    except Exception as e:
+        st.error("Erreur pendant l'import de 'cdd_temperatures'.")
+        with st.expander("Traceback complet"):
+            st.exception(e)
+        st.stop()
+
+    try:
+        figures = get_all_cdd_figures()
+    except Exception as e:
+        st.error("Erreur à l'exécution de get_all_cdd_figures().")
+        with st.expander("Traceback complet"):
+            st.exception(e)
+        st.stop()
+
     st.write(f"Figures CDD récupérées ({len(figures)}): {list(figures.keys())}")
+
     st.subheader("Egypt")
     egypt_figs = {k: v for k, v in figures.items() if 'Egypt' in k}
     cols = st.columns(3); col_idx = 0
@@ -96,6 +119,7 @@ with tab3:
             st.subheader(title)
             st.plotly_chart(fig, use_container_width=True, key=f"egypt_cdd_{i}")
         col_idx = (col_idx + 1) % 3
+
     st.markdown("---")
     st.subheader("Saudi Arabia")
     saudi_figs = {k: v for k, v in figures.items() if 'Saudi' in k}
@@ -105,6 +129,7 @@ with tab3:
             st.subheader(title)
             st.plotly_chart(fig, use_container_width=True, key=f"saudi_cdd_{i}")
         col_idx = (col_idx + 1) % 3
+
 
 # === TAB 4: BALANCES (FGE / EA) ===
 with tab4:
