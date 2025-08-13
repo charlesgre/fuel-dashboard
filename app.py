@@ -1,5 +1,6 @@
 # app.py
 import os
+import platform
 from pathlib import Path
 import streamlit as st
 
@@ -18,17 +19,32 @@ st.title("📊 Fuel Dashboard")
 
 # --- EA PDFs location (configure BEFORE importing ea_balances) ---
 repo_root = Path(__file__).resolve().parent
-local_default = repo_root / "EA balances"  # dossier présent dans le repo (Linux-friendly)
+local_default = repo_root / "EA balances"   # dossier DU REPO (doit exister en prod)
 
-# Priorité: secrets -> env -> fallback local (./EA balances)
-EA_DIR = st.secrets.get("EA_PDF_DIR", os.getenv("EA_PDF_DIR", str(local_default)))
-os.environ["EA_PDF_DIR"] = EA_DIR  # doit être défini avant import de ea_balances
+# ordre: env -> secrets -> fallback local
+EA_DIR = os.getenv("EA_PDF_DIR", st.secrets.get("EA_PDF_DIR", str(local_default)))
+
+# ⛑️ Protection: si on n'est PAS sous Windows et que le chemin ressemble à un UNC, basculer sur le fallback local
+if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startswith("//")):
+    EA_DIR = str(local_default)
+
+os.environ["EA_PDF_DIR"] = EA_DIR  # doit être défini avant d'importer ea_balances
 st.caption(f"EA_PDF_DIR utilisé: {EA_DIR}")
 
-# ⚠️ Import 'ea_balances' APRES avoir fixé EA_PDF_DIR
+# Debug rapide pour voir ce que le runtime voit
+with st.expander("EA debug"):
+    p = Path(EA_DIR)
+    st.write("OS:", platform.system(), "| CWD:", Path.cwd())
+    st.write("Existe:", p.exists())
+    try:
+        st.write("Fichiers (extrait):", [x.name for x in p.glob("*.pdf")][:10])
+    except Exception as e:
+        st.write("Listing impossible:", e)
+
+# ⚠️ Import après config du path
 from ea_balances import load_ea_data as _load_ea_data, plot_ea  # noqa: E402
 
-# --- Cached EA loader (pour éviter de reparser à chaque clic) ---
+# --- Cached EA loader ---
 @st.cache_data(show_spinner=False)
 def get_ea_data_cached():
     return _load_ea_data()
@@ -60,8 +76,7 @@ with tab2:
 with tab3:
     st.header("CDD / Temperatures")
     figures = get_all_cdd_figures()
-    st.write(f"Figures CDD récupérées ({len(figures)}): {list(figures.keys())}")  # debug
-    # Egypt
+    st.write(f"Figures CDD récupérées ({len(figures)}): {list(figures.keys())}")
     st.subheader("Egypt")
     egypt_figs = {k: v for k, v in figures.items() if 'Egypt' in k}
     cols = st.columns(3); col_idx = 0
@@ -71,7 +86,6 @@ with tab3:
             st.plotly_chart(fig, use_container_width=True, key=f"egypt_cdd_{i}")
         col_idx = (col_idx + 1) % 3
     st.markdown("---")
-    # Saudi Arabia
     st.subheader("Saudi Arabia")
     saudi_figs = {k: v for k, v in figures.items() if 'Saudi' in k}
     cols = st.columns(3); col_idx = 0
