@@ -1,12 +1,17 @@
-# -*- coding: utf-8 -*-
-import os, re, glob
+# -------- Config (chemin configurable) --------
+import os, re, glob, platform
 from pathlib import Path
 import pandas as pd
 import pdfplumber
 import plotly.graph_objects as go
 
-# -------- Config --------
-BASE_PDF_DIR = Path(r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\EA balances")
+# Utilise d'abord la variable d'environnement EA_PDF_DIR.
+# Sinon, on retombe sur le chemin UNC Windows (utile en local).
+BASE_PDF_DIR = Path(os.getenv(
+    "EA_PDF_DIR",
+    r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\EA balances"
+))
+
 COUNTRIES = ["Netherlands", "Belgium", "Italy", "Total"]
 QUARTERS  = ["Q1", "Q2", "Q3", "Q4"]
 
@@ -69,8 +74,28 @@ def _extract_country_balance_agg(page_text: str, country: str) -> list[int]:
     return [_parse_tok(v) for v in m.groups()]
 
 def _get_latest_pdf_file() -> Path:
+    # 1) le dossier existe ?
+    if not BASE_PDF_DIR.exists():
+        raise FileNotFoundError(
+            "Répertoire introuvable pour EA PDFs : "
+            f"{BASE_PDF_DIR}\n"
+            f"OS={platform.system()} | cwd={Path.cwd()}\n"
+            "En environnement Linux/Cloud, le partage UNC Windows n'est pas monté. "
+            "Définis EA_PDF_DIR vers un dossier local accessible au runtime."
+        )
+
+    # 2) y a-t-il des PDF ?
     pdfs = glob.glob(str(BASE_PDF_DIR / "*.pdf"))
-    if not pdfs: raise FileNotFoundError(f"Aucun PDF trouvé dans {BASE_PDF_DIR}")
+    if not pdfs:
+        try:
+            listing = "\n".join([p.name for p in sorted(BASE_PDF_DIR.iterdir())][:20])
+        except Exception:
+            listing = "(lecture du dossier impossible)"
+        raise FileNotFoundError(
+            f"Aucun PDF trouvé dans {BASE_PDF_DIR}\n"
+            f"Contenu du dossier (extrait):\n{listing}"
+        )
+
     latest = max(pdfs, key=os.path.getmtime)
     return Path(latest)
 
