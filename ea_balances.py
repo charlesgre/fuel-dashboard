@@ -160,116 +160,41 @@ def _get_latest_pdf_file() -> Path:
 
 # ---------- Localisation fiable de la vraie page Fig.10 ----------
 def _find_fig10_page_text(pdf_path: Path) -> tuple[str, int]:
-    """
-    Retourne (texte_de_la_page, page_number_1_based) pour la vraie Fig.10.
-
-    1) Parcourt toutes les pages qui contiennent le titre "Fig 10: Europe fuel oil balance"
-       et IGNORE TOUTES les variantes de "Table of figures" (y compris lettres espacées).
-    2) Score: Demand/Supply + pays -> on garde la meilleure.
-    3) Fallback: on lit la page "Table of figures" pour extraire le numéro de page de Fig.10
-       (ex: '... kb/d  9') et on ouvre directement cette page.
-    """
-    import pdfplumber, re
-
-    def _clean(s: str) -> str:
-        # même normalisation que ton code
-        s = _collapse_spaced_words(_norm_text(s or ""))
-        return s
-
-    # titre Fig.10
-    title_re = re.compile(r"Fig\.?\s*10\b.*Europe\s+fuel\s+oil\s+balance", re.I)
-    # détection robuste du libellé "Table of figures" même si lettres espaçées
-    tof_re = re.compile(r"t\s*a\s*b\s*l\s*e\s+o\s*f\s+f\s*i\s*g\s*u\s*r\s*e\s*s", re.I)
-
-    countries = ("Netherlands", "Belgium", "Italy", "Total")
-
-    best_txt, best_score, best_page_no = None, -1, -1
-
+    """Trouve la page qui contient exactement 'Fig 10: Europe fuel oil balance by grade'."""
+    import re, pdfplumber
     with pdfplumber.open(pdf_path) as pdf:
-        # --- 1) pages candidates avec le titre (en ignorant la table des figures) ---
-        for idx, page in enumerate(pdf.pages, start=1):
-            try:
-                t = page.extract_text(x_tolerance=8, y_tolerance=8, layout=True) or ""
-            except TypeError:
-                t = page.extract_text() or ""
-            t = _clean(t)
-
-            if not title_re.search(t):
-                continue
-            if tof_re.search(t):  # ignorer *toutes* les variantes "Table of figures"
-                continue
-
-            score = (
-                len(re.findall(r"\bDemand\b", t, re.I))
-                + len(re.findall(r"\bSupply\b", t, re.I))
-                + 2 * sum(bool(re.search(rf"\b{c}\b", t, re.I)) for c in countries)
-            )
-
-            if score > best_score:
-                best_txt, best_score, best_page_no = t, score, idx
-
-        if best_txt:
-            return best_txt, best_page_no
-
-        # --- 2) Fallback: prendre le numéro dans la Table of figures ---
-        tof_page_no = None
-        tof_text = ""
-        for idx, page in enumerate(pdf.pages, start=1):
-            t = _clean(page.extract_text() or "")
-            if tof_re.search(t):
-                tof_text = t
-                m = re.search(r"Fig\s*10:.*?(\d{1,3})\s*$", t, re.I | re.M)
-                if m:
-                    tof_page_no = int(m.group(1))
-                break
-
-        if tof_page_no and 1 <= tof_page_no <= len(pdf.pages):
-            # ouvrir directement la page annoncée (ex: 9)
-            try:
-                t = pdf.pages[tof_page_no - 1].extract_text(x_tolerance=8, y_tolerance=8, layout=True) or ""
-            except TypeError:
-                t = pdf.pages[tof_page_no - 1].extract_text() or ""
-            return _clean(t), tof_page_no
-
-    raise RuntimeError("Fig.10 introuvable: ni page avec le titre, ni Table of figures exploitable.")
-
+        for i, page in enumerate(pdf.pages, start=1):
+            txt = page.extract_text() or ""
+            if re.search(r"Fig\s*10:\s*Europe fuel oil balance by grade", txt, flags=re.I):
+                return txt, i
+    raise RuntimeError("Fig.10 not found in the PDF.")
 
 def _parse_fig10(pdf_path: Path) -> dict:
     """
-    Version calquée sur le script 'qui marche':
-    - Cherche la page contenant exactement "Fig 10: Europe fuel oil balance by grade".
-    - Découpe en 4 blocs par pays sur ce texte brut (sans normalisation agressive).
-    - Utilise Ref. Supply / Blending / Inland / Bunkers, HSFO/LSFO tel quel.
+    Version alignée sur le script 'qui marche' :
+    - utilise exactement le texte de la page qui contient 'Fig 10: Europe fuel oil balance by grade'
+    - découpe 4 blocs pays par lookahead vers (autres pays|Source:)
+    - parse Demand/Supply avec Ref. Supply / Blending / Inland / Bunkers (8 valeurs)
     """
     import re
-    import pdfplumber
 
     countries = ["Netherlands", "Belgium", "Italy", "Total"]
 
-    # ===== 1) Récupérer la page Fig.10 EXACTE (comme dans ton script) =====
-    target_page_text = None
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            txt = page.extract_text() or ""
-            if re.search(r"Fig\s*10:\s*Europe fuel oil balance by grade", txt, flags=re.I):
-                target_page_text = txt
-                break
-    if not target_page_text:
-        raise RuntimeError("Fig.10 not found in the PDF.")
+    # === 1) récupérer le texte brut de la page Fig.10 (sans normalisation agressive)
+    target_page_text, _ = _find_fig10_page_text(pdf_path)
 
-    # ===== 2) Découpage en 4 blocs pays =====
+    # === 2) découper en 4 blocs pays (comme ton script)
     patterns: dict[str, str] = {}
     for c in countries:
         next_keywords = [k for k in countries if k != c]
         end_pat = r"(?:" + r"|".join(map(re.escape, next_keywords + ["Source:"])) + r")"
         m = re.search(rf"{re.escape(c)}[\s\S]*?(?={end_pat})", target_page_text)
-        if m:
-            patterns[c] = m.group(0)
-        else:
-            # on tolère l'absence d'un bloc pays : on met vide (affichera 0)
-            patterns[c] = ""
+        if not m:
+            # on préfère être explicite : si un bloc manque, mieux vaut remonter l'info
+            raise RuntimeError(f"Block for {c} not found on Fig.10 page.")
+        patterns[c] = m.group(0)
 
-    # ===== 3) Aides parsing (identiques à ton script qui marche) =====
+    # === 3) helpers de parsing (identiques à ton script)
     tok  = r"(\(?-?\d[\d,]*\)?|--)"
     tok8 = rf"{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}"
 
@@ -283,30 +208,24 @@ def _parse_fig10(pdf_path: Path) -> dict:
         return int(x)
 
     def _section_slice(block: str, section: str) -> str:
-        """Retourne uniquement la section Demand ou Supply du bloc pays (comme le script)."""
         if section == "Demand":
             m = re.search(r"Demand\s+(.*?)(?:\n\s*Supply\b)", block, flags=re.S)
         else:
             m = re.search(r"\bSupply\s+(.*)$", block, flags=re.S)
         if not m:
-            return ""  # on tolère → renverra des zéros
+            raise RuntimeError(f"Section '{section}' introuvable dans bloc pays.")
         return m.group(1)
 
     def _demand_grade_slice(demand_text: str, grade: str) -> str:
-        """Isole la partie du grade dans Demand (pour capturer Inland/Bunkers)."""
-        if not demand_text:
-            return ""
         other = "LSFO" if grade == "HSFO" else "HSFO"
         m_start = re.search(rf"\b{grade}\b", demand_text)
         if not m_start:
-            return ""
+            raise RuntimeError(f"Grade '{grade}' introuvable dans Demand.")
         tail = demand_text[m_start.end():]
         m_end = re.search(rf"\b{other}\b", tail)
         return tail[:m_end.start()] if m_end else tail
 
     def _extract_subline(section_text: str, label: str) -> list[int]:
-        if not section_text:
-            return [0]*8
         m = re.search(rf"\b{label}\b\s+{tok8}", section_text)
         if not m:
             return [0]*8
@@ -324,20 +243,18 @@ def _parse_fig10(pdf_path: Path) -> dict:
 
         # Ref. Supply {grade} (jusqu'à 'Blending' ou fin)
         ref_vals = [0]*8
-        if sup:
-            m_ref_blk = re.search(r"Ref\.?\s*Supply\s+(.*?)(?:\n\s*Blending\b|\Z)", sup, flags=re.S)
-            if m_ref_blk:
-                ref_vals = _extract_subline(m_ref_blk.group(1), grade)
+        m_ref_blk = re.search(r"Ref\.?\s*Supply\s+(.*?)(?:\n\s*Blending\b|\Z)", sup, flags=re.S)
+        if m_ref_blk:
+            ref_vals = _extract_subline(m_ref_blk.group(1), grade)
 
         # Blending {grade}
         blend_vals = [0]*8
-        if sup:
-            m_bl_blk = re.search(r"\bBlending\s+(.*)$", sup, flags=re.S)
-            if m_bl_blk:
-                blend_vals = _extract_subline(m_bl_blk.group(1), grade)
+        m_bl_blk = re.search(r"\bBlending\s+(.*)$", sup, flags=re.S)
+        if m_bl_blk:
+            blend_vals = _extract_subline(m_bl_blk.group(1), grade)
 
-        # Fallback: ligne directe "HSFO ..."/"LSFO ..." dans Supply
-        if all(v == 0 for v in ref_vals) and all(v == 0 for v in blend_vals) and sup:
+        # Fallback: si Ref et Blending absents, prendre ligne directe "<grade> ..."
+        if all(v == 0 for v in ref_vals) and all(v == 0 for v in blend_vals):
             m_dir = re.search(rf"^\s*{grade}\b\s+{tok8}", sup, flags=re.M)
             if m_dir:
                 ref_vals = [_parse_tok(v) for v in m_dir.groups()]
@@ -347,17 +264,19 @@ def _parse_fig10(pdf_path: Path) -> dict:
 
     def _extract_country_balance_agg(page_text: str, country: str) -> list[int]:
         m = re.search(rf"{re.escape(country)}\s+{tok8}", page_text)
-        return [_parse_tok(v) for v in m.groups()] if m else [0]*8
+        if not m:
+            # sur ton PDF c'est présent — on le signale sinon
+            raise RuntimeError(f"Balance agrégée introuvable pour {country}.")
+        return [_parse_tok(v) for v in m.groups()]
 
-    # ===== 4) Construire le dict final (identique en structure au reste de l'app) =====
+    # === 4) construire la structure attendue par le reste de l'app
     data: dict[str, dict] = {}
     for c, block in patterns.items():
-        d: dict[str, dict] = {}
-        d["Balance_total"] = _extract_country_balance_agg(target_page_text, c)
-        d["Demand"] = {}
-        d["Supply"] = {}
-        d["Demand_parts"] = {}
-        d["Supply_parts"] = {}
+        d = {
+            "Balance_total": _extract_country_balance_agg(target_page_text, c),
+            "Demand": {}, "Supply": {},
+            "Demand_parts": {}, "Supply_parts": {}
+        }
 
         for grade in ["HSFO", "LSFO"]:
             # DEMAND = Inland + Bunkers
@@ -370,15 +289,15 @@ def _parse_fig10(pdf_path: Path) -> dict:
             d["Supply_parts"][grade] = {"Ref": ref_s, "Blend": blend_s}
             d["Supply"][grade] = [ref_s[i] + blend_s[i] for i in range(8)]
 
-            # BALANCE(grade) = (Ref + Blending) - (Inland + Bunkers)
+            # BALANCE(grade)
             d[f"Balance_{grade}"] = [
-                (ref_s[i] + blend_s[i]) - (inland_d[i] + bunkers_d[i])
-                for i in range(8)
+                (ref_s[i] + blend_s[i]) - (inland_d[i] + bunkers_d[i]) for i in range(8)
             ]
 
         data[c] = d
 
     return data
+
 
 
 def _to_tidy_dataframe(parsed: dict) -> pd.DataFrame:
