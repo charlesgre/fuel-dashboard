@@ -313,23 +313,10 @@ def _parse_fig10(pdf_path: Path) -> dict:
         m = re.search(rf"{re.escape(country)}\s+(.*)$", page_text, flags=re.M)
         return _grab8(m.group(1)) if m else [0]*8
 
-    # --- 1) localiser la page (comme l'e-mail) ---
-    target = None
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            raw = page.extract_text() or ""
-            if "Fig 10: Europe fuel oil balance by grade" in raw:
-                target = _fix_tokens(raw)
-                break
-    if not target:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                raw = page.extract_text() or ""
-                if re.search(r"Fig\s*10:\s*Europe\s+fuel\s+oil\s+balance", raw, flags=re.I):
-                    target = _fix_tokens(raw)
-                    break
-    if not target:
-        raise RuntimeError("Fig.10 not found in the PDF (email method + fixes).")
+    # --- 1) localiser la page de manière robuste ---
+    # Utilise le détecteur multi-tolérances défini plus haut dans le fichier
+    page_txt, _ = _find_fig10_page_text(pdf_path)
+    target = _fix_tokens(page_txt)
 
     # --- 2) découpe en 4 blocs (ancres pays sinon 4 x 'Demand') ---
     patterns: dict[str, str] = {}
