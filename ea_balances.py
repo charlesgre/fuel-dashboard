@@ -7,7 +7,7 @@ import pdfplumber
 import plotly.graph_objects as go
 
 # ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
-PARSER_VERSION = "ea_parser_v13"
+PARSER_VERSION = "ea_parser_v14"
 
 # ---------- Chemins ----------
 REPO_ROOT = Path(__file__).resolve().parent
@@ -30,6 +30,15 @@ if platform.system() != "Windows":
 
 COUNTRIES = ["Netherlands", "Belgium", "Italy", "Total"]
 QUARTERS  = ["Q1", "Q2", "Q3", "Q4"]
+
+# alias tolérés pour variations d’EA / extraction PDF
+COUNTRY_ALIASES: dict[str, list[str]] = {
+        "Netherlands": [r"Netherlands", r"The\s+Netherlands", r"\bNL\b"],
+        "Belgium":     [r"Belgium", r"\bBE\b"],
+        "Italy":       [r"Italy", r"\bIT\b"],
+        "Total":       [r"Total(?:\s*Europe)?", r"Europe\s*Total", r"EU\s*Total"],
+    }
+
 
 _tok  = r"(\(?-?\d[\d,]*\)?|--)"
 _tok8 = rf"{_tok}\s+{_tok}\s+{_tok}\s+{_tok}\s+{_tok}\s+{_tok}\s+{_tok}\s+{_tok}"
@@ -304,9 +313,16 @@ def _parse_fig10(pdf_path: Path) -> dict:
     # 2a) positions des pays (mot entier, insensible à la casse)
     hits = []
     for c in countries:
-        m = re.search(rf"(?<![A-Za-z]){re.escape(c)}(?![A-Za-z])", page_text, flags=re.I)
-        if m:
-            hits.append((c, m.start()))
+        # essaie tous les alias pour ce pays
+        pos = None
+        for pat in COUNTRY_ALIASES[c]:
+            m = re.search(rf"(?<![A-Za-z]){pat}(?![A-Za-z])", page_text, flags=re.I)
+            if m:
+                pos = m.start()
+                break
+        if pos is not None:
+            hits.append((c, pos))
+
 
     if len(hits) >= 2:  # on peut découper par positions
         hits.sort(key=lambda kv: kv[1])
@@ -323,7 +339,10 @@ def _parse_fig10(pdf_path: Path) -> dict:
                 blocks[countries[i]] = page_text[spans[i]:spans[i+1]]
 
     if len(blocks) != 4:
-        raise RuntimeError("Fig.10: anchors par pays introuvables (Netherlands/Belgium/Italy/Total).")
+        # Dernier fallback: ne pas bloquer — créer des blocs vides pour les manquants.
+        for c in countries:
+            blocks.setdefault(c, "")
+        print("[EA parser] Avertissement: blocs pays incomplets — fallback zéro appliqué.")
 
 
 
