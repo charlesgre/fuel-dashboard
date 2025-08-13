@@ -121,71 +121,117 @@ def _norm_text(s: str) -> str:
     s = re.sub(r"[ \t]+", " ", s)
     return s
 
+def _norm_text(s: str) -> str:
+    # normalise espaces & ponctuation légère
+    s = s.replace("\u00A0", " ")  # NBSP
+    s = s.replace("–", "-").replace("—", "-")
+    s = re.sub(r"[ \t]+", " ", s)
+    return s
+
+def _collapse_spaced_words(s: str) -> str:
+    """
+    Recolle les mots quand le PDF a 'N e t h e r l a n d s' -> 'Netherlands'
+    et les libellés 'D e m a n d', 'S u p p l y', 'I n l a n d', 'B u n k e r', etc.
+    NE TOUCHE PAS aux séparations entre mots.
+    """
+    # lettres espacées (>=2 lettres)
+    s = re.sub(
+        r'(?<![A-Za-z])(?:[A-Za-z]\s+){2,}[A-Za-z](?![A-Za-z])',
+        lambda m: m.group(0).replace(" ", ""),
+        s
+    )
+    return s
+
+
 def _parse_fig10(pdf_path: Path) -> dict:
-    # 1) trouver la page Fig.10 avec un titre plus permissif
+    import re
+    import pdfplumber
+
+    # --- Helpers locaux (pour ne pas dépendre d'autres définitions) ---
+    def _norm_text(s: str) -> str:
+        # normalise espaces/ponctuation légère
+        s = s.replace("\u00A0", " ")  # NBSP
+        s = s.replace("–", "-").replace("—", "-")
+        s = re.sub(r"[ \t]+", " ", s)
+        return s
+
+    def _collapse_spaced_words(s: str) -> str:
+        """
+        Recolle les mots rendus 'éclatés' par le PDF : 'N e t h e r l a n d s' -> 'Netherlands'
+        Sans fusionner les mots séparés (on ne touche pas aux espaces simples entre deux mots).
+        """
+        return re.sub(
+            r'(?<![A-Za-z])(?:[A-Za-z]\s+){2,}[A-Za-z](?![A-Za-z])',
+            lambda m: m.group(0).replace(" ", ""),
+            s
+        )
+
+    # --- 1) Localiser la page Fig.10 de façon permissive ---
     title_re = re.compile(r"Fig\.?\s*10\b.*Europe\s+fuel\s+oil\s+balance", re.I)
     target_page_text = None
+    used_tol = None
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            # layout=True garde mieux les sauts/colonnes
-            txt = page.extract_text(layout=True) or page.extract_text() or ""
-            txt = _norm_text(txt)
-            if title_re.search(txt):
-                target_page_text = txt
+            # Essayer plusieurs tolérances pour "recoller" les caractères
+            for xt in (8, 7, 6, 5, 4, 3, 2):
+                try:
+                    txt = page.extract_text(x_tolerance=xt, y_tolerance=xt, layout=True) or ""
+                except TypeError:
+                    # Compatibilité vieille version : sans x/y_tolerance
+                    txt = page.extract_text(layout=True) or page.extract_text() or ""
+                txt = _collapse_spaced_words(_norm_text(txt))
+                if title_re.search(txt):
+                    target_page_text = txt
+                    used_tol = xt
+                    break
+            if target_page_text:
                 break
 
     if not target_page_text:
         raise RuntimeError("Fig.10 introuvable (titre non détecté).")
 
-    # 2) variantes de noms de pays (ex: 'Total Europe')
+    # --- 2) Repérer les ancres pays (avec variantes) ---
     country_patterns = {
-        "Netherlands": r"\bNetherlands\b",
+        "Netherlands": r"\b(?:Netherlands|The Netherlands)\b",
         "Belgium":     r"\bBelgium\b",
         "Italy":       r"\bItaly\b",
         "Total":       r"\b(?:Total(?:\s*Europe)?|Europe\s*Total)\b",
     }
 
-    # 3) localiser chaque bloc par indices (start -> start du suivant)
     anchors = []
     for cname, cre in country_patterns.items():
         m = re.search(cre, target_page_text, flags=re.I)
         if m:
-            anchors.append((m.start(), cname))
+            anchors.append((m.start(), cname, m.group(0)))
     anchors.sort(key=lambda x: x[0])
 
     if len(anchors) < 4:
-        # aide au debug: montre les 2000 premiers caractères
-        snippet = target_page_text[:2000]
+        snippet = target_page_text[:1200]
         raise RuntimeError(
             "Impossible d'identifier les 4 en-têtes pays sur Fig.10.\n"
-            f"Trouvés: {[c for _, c in anchors]}\n\nEXTRAIT:\n{snippet}"
+            f"Trouvés: {[c for _, c, _ in anchors]} | x_tolerance utilisé: {used_tol}\n\nEXTRAIT:\n{snippet}"
         )
 
-    # 4) constituer les blocs pays par découpe d'indices
+    # --- 3) Découper les blocs pays par indices ---
     blocks = {}
-    for i, (start, cname) in enumerate(anchors):
+    for i, (start, cname, _) in enumerate(anchors):
         end = anchors[i+1][0] if i+1 < len(anchors) else len(target_page_text)
-        blocks[cname] = target_page_text[start:end]
-
-    # 5) 'Source:' peut être 'Source :' ou sans deux-points -> pas critique car on découpe par indices
-    #    On peut quand même tronquer à 'Source' si présent dans le dernier bloc
-    for k in list(blocks.keys()):
-        blk = blocks[k]
+        blk = target_page_text[start:end]
+        # tronquer à 'Source' si présent
         msrc = re.search(r"\bSource\b", blk, flags=re.I)
         if msrc:
-            blocks[k] = blk[:msrc.start()]
+            blk = blk[:msrc.start()]
+        blocks[cname] = blk
 
-    # 6) reconstruire la structure data exactement comme avant
+    # --- 4) Construire la structure 'data' (Demand/Supply/Balance) ---
     data = {}
     for c in COUNTRIES:
-        # le dernier alias retenu pour 'Total' peut être 'Total', 'Total Europe', etc.
-        # on mappe vers la clé réelle présente
+        # gérer 'Total' vs 'Total Europe' (clé effective dans blocks)
         key = c
-        if c == "Total":
-            # choisir la clé présente dans blocks pour le total
+        if c == "Total" and "Total" not in blocks:
             for cand in blocks.keys():
-                if re.search(country_patterns["Total"], cand, flags=re.I) or cand.lower().startswith("total"):
+                if re.search(country_patterns["Total"], cand, flags=re.I):
                     key = cand
                     break
 
@@ -193,17 +239,15 @@ def _parse_fig10(pdf_path: Path) -> dict:
         if not block:
             raise RuntimeError(f"Bloc pays manquant après découpe: {c}")
 
-        d = {}
-        # Balance imprimée (ligne agrégée) – plus permissif sur le libellé pays
-        agg_re = re.compile(rf"{country_patterns.get(c, re.escape(c))}\s+{_tok8}", re.I)
-        m = agg_re.search(target_page_text)
+        # Balance agrégée (ligne du pays) — matcher soit le canonique, soit la clé effective
+        agg_re_primary = re.compile(rf"{country_patterns[c]}\s+{_tok8}", re.I) if c in country_patterns else None
+        m = agg_re_primary.search(target_page_text) if agg_re_primary else None
         if not m:
-            # fallback : essaie sur la clé effective
-            agg_re2 = re.compile(rf"{re.escape(key)}\s+{_tok8}", re.I)
-            m = agg_re2.search(target_page_text)
+            m = re.search(rf"{re.escape(key)}\s+{_tok8}", target_page_text, flags=re.I)
         if not m:
             raise RuntimeError(f"Balance agrégée introuvable pour {c}")
 
+        d = {}
         d["Balance_total"] = [_parse_tok(v) for v in m.groups()]
         d["Demand"] = {}
         d["Supply"] = {}
@@ -211,14 +255,17 @@ def _parse_fig10(pdf_path: Path) -> dict:
         d["Supply_parts"] = {}
 
         for grade in ["HSFO", "LSFO"]:
+            # DEMAND = Inland + Bunkers
             inland_d, bunkers_d = _extract_demand_parts(block, grade)
             d["Demand_parts"][grade] = {"Inland": inland_d, "Bunkers": bunkers_d}
             d["Demand"][grade] = [inland_d[i] + bunkers_d[i] for i in range(8)]
 
+            # SUPPLY = Ref + Blending (avec fallback géré dans _extract_supply_parts)
             ref_s, blend_s = _extract_supply_parts(block, grade)
             d["Supply_parts"][grade] = {"Ref": ref_s, "Blend": blend_s}
             d["Supply"][grade] = [ref_s[i] + blend_s[i] for i in range(8)]
 
+            # BALANCE(grade)
             d[f"Balance_{grade}"] = [
                 (ref_s[i] + blend_s[i]) - (inland_d[i] + bunkers_d[i]) for i in range(8)
             ]
@@ -226,6 +273,7 @@ def _parse_fig10(pdf_path: Path) -> dict:
         data[c] = d
 
     return data
+
 
 def _to_tidy_dataframe(parsed: dict) -> pd.DataFrame:
     rows = []
