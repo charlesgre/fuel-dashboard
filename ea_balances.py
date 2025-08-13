@@ -193,37 +193,41 @@ def _find_fig10_page_text(pdf_path: Path) -> tuple[str, int]:
 def _parse_fig10(pdf_path: Path) -> dict:
     """
     Fig.10 parser robuste :
-      - Localise la page par le titre "Fig 10: Europe fuel oil balance by grade"
-        (fallback regex tolérant).
+      - Localise la page via _find_fig10_page_text (tolérances + ignore TOF).
       - Recolle libellés et chiffres éclatés (ex: '1 2 8' -> '128', '( 5 3 )' -> '(53)').
       - Découpe la page en 4 blocs (ancres pays; sinon 4 x 'Demand').
-      - Après chaque libellé (Inland/Bunkers/Ref Supply/Blending), lit 8 valeurs
-        en autorisant des espaces *dans* les nombres.
+      - Après chaque libellé (Inland/Bunkers/Ref Supply/Blending), lit 8 valeurs.
     """
     import re
     import pdfplumber
 
     countries = ["Netherlands", "Belgium", "Italy", "Total"]
 
-    # --- helpers ---
+    # --- helpers numériques permissifs ---
     def _parse_tok_loose(tok: str) -> int:
         t = tok.replace(" ", "").replace(",", "")
-        if t == "--": 
+        if t == "--":
             return 0
         neg = False
         if t.startswith("(") and t.endswith(")"):
             neg = True
             t = t[1:-1]
-        # garde les chiffres et le signe
         val = int(re.sub(r"[^\d-]", "", t) or "0")
         return -val if neg or t.startswith("-") else val
 
+    def _grab8(chunk: str) -> list[int]:
+        # supprime les en-têtes de colonnes Q1 '25 etc.
+        c = re.sub(r"Q\s*\d\s*'?\d{2}", " ", chunk, flags=re.I)
+        # autoriser des espaces DANS les nombres
+        toks = re.findall(r"\(\s*-?\s*[\d,\s]+\s*\)|-?\d[\d\s,]*|--", c)
+        vals = [_parse_tok_loose(t) for t in toks[:8]]
+        return vals + [0] * (8 - len(vals))
+
+    # --- normalisation / recollage des libellés + chiffres ---
     def _fix_tokens(txt: str) -> str:
-        # normalisation de base
         txt = (txt or "").replace("\u00A0", " ")
         txt = re.sub(r"[ \t]+", " ", txt)
 
-        # recoller mots éclatés (N e t h e r l a n d s, D e m a n d, etc.)
         def squash(token: str, repl: str | None = None) -> str:
             letters = [c for c in token if c.isalpha()]
             if not letters:
@@ -238,28 +242,19 @@ def _parse_fig10(pdf_path: Path) -> dict:
         txt = squash("Ref. Supply", "Ref Supply")
         txt = squash("Ref Supply", "Ref Supply")
 
-        # recoller chiffres éclatés
-        txt = re.sub(r'(?<=\d)\s+(?=\d)', '', txt)    # 1 2 8 -> 128
-        txt = re.sub(r'\(\s+', '(', txt)              # ( 5 3 ) -> (53)
+        # chiffres éclatés
+        txt = re.sub(r'(?<=\d)\s+(?=\d)', '', txt)
+        txt = re.sub(r'\(\s+', '(', txt)
         txt = re.sub(r'\s+\)', ')', txt)
         txt = re.sub(r'-\s+', '-', txt)
         txt = re.sub(r'\s*,\s*', ',', txt)
         return txt
 
-    def _grab8(chunk: str) -> list[int]:
-        """Récupère 8 valeurs en autorisant des espaces DANS les nombres."""
-        # retire les marqueurs de colonnes Q1 '25 etc.
-        c = re.sub(r"Q\s*\d\s*'?\d{2}", " ", chunk, flags=re.I)
-        # ← différence clé: autoriser \s dans les nombres, pas seulement dans ( ... )
-        toks = re.findall(r"\(\s*-?\s*[\d,\s]+\s*\)|-?\d[\d\s,]*|--", c)
-        vals = [_parse_tok_loose(t) for t in toks[:8]]
-        return vals + [0] * (8 - len(vals))
-
     def _section_slice(block: str, section: str) -> str:
         if section == "Demand":
-            m = re.search(r"Demand\s+(.*?)(?:\bSupply\b)", block, flags=re.S)
+            m = re.search(r"Demand\s+(.*?)(?:\bSupply\b)", block, flags=re.S | re.I)
         else:
-            m = re.search(r"\bSupply\b\s*(.*)$", block, flags=re.S)
+            m = re.search(r"\bSupply\b\s*(.*)$", block, flags=re.S | re.I)
         if not m:
             raise RuntimeError(f"Section '{section}' introuvable.")
         return m.group(1)
@@ -275,94 +270,97 @@ def _parse_fig10(pdf_path: Path) -> dict:
 
     def _grab_after_label(text: str, label: str) -> list[int]:
         m = re.search(rf"\b{label}\b", text)
-        if not m: 
+        if not m:
             return [0]*8
         rest = text[m.end():]
-        mstop = re.search(r"\b(Bunkers|Inland|Blending|Ref Supply|Supply|HSFO|LSFO|Netherlands|Belgium|Italy|Total)\b", rest)
+        mstop = re.search(r"\b(Bunkers|Inland|Blending|Ref Supply|Supply|HSFO|LSFO|Netherlands|Belgium|Italy|Total|Source:)\b",
+                          rest, flags=re.I)
         chunk = rest[:mstop.start()] if mstop else rest
         return _grab8(chunk)
 
     def _extract_demand_parts(block: str, grade: str):
         dem = _section_slice(block, "Demand")
         seg = _demand_grade_slice(dem, grade)
-        inland  = _grab_after_label(seg, "Inland")
-        bunkers = _grab_after_label(seg, "Bunkers")
-        return inland, bunkers
+        return _grab_after_label(seg, "Inland"), _grab_after_label(seg, "Bunkers")
 
     def _extract_supply_parts(block: str, grade: str):
         sup = _section_slice(block, "Supply")
-        # Ref Supply -> valeurs pour le grade demandé
         ref_vals = [0]*8
-        mref = re.search(rf"\bRef\s+Supply\b.*?\b{grade}\b(.*?)(?:\bHSFO\b|\bLSFO\b|\bBlending\b|\Z)", sup, flags=re.S)
+        mref = re.search(rf"\bRef\s+Supply\b.*?\b{grade}\b(.*?)(?:\bHSFO\b|\bLSFO\b|\bBlending\b|\Z)", sup, flags=re.S | re.I)
         if mref:
             ref_vals = _grab8(mref.group(1))
-        # Blending -> valeurs pour le grade demandé
         blend_vals = [0]*8
-        mbl = re.search(rf"\bBlending\b.*?\b{grade}\b(.*?)(?:\bHSFO\b|\bLSFO\b|\Z)", sup, flags=re.S)
+        mbl = re.search(rf"\bBlending\b.*?\b{grade}\b(.*?)(?:\bHSFO\b|\bLSFO\b|\Z)", sup, flags=re.S | re.I)
         if mbl:
             blend_vals = _grab8(mbl.group(1))
-        # Fallback: ligne directe "<grade> ..."
         if all(v == 0 for v in ref_vals) and all(v == 0 for v in blend_vals):
-            mdir = re.search(rf"\b{grade}\b(.*?)(?:\bHSFO\b|\bLSFO\b|\Z)", sup, flags=re.S)
+            mdir = re.search(rf"\b{grade}\b(.*?)(?:\bHSFO\b|\bLSFO\b|\Z)", sup, flags=re.S | re.I)
             if mdir:
                 ref_vals = _grab8(mdir.group(1))
                 blend_vals = [0]*8
         return ref_vals, blend_vals
 
     def _extract_country_balance_row(page_text: str, country: str) -> list[int]:
-        m = re.search(rf"{re.escape(country)}\s+(.*)$", page_text, flags=re.M)
+        m = re.search(rf"(?<![A-Za-z]){re.escape(country)}(?![A-Za-z])\s+(.*)$", page_text, flags=re.M | re.I)
         return _grab8(m.group(1)) if m else [0]*8
 
-    # --- 1) localiser la page de manière robuste ---
-    # Utilise le détecteur multi-tolérances défini plus haut dans le fichier
-    page_txt, _ = _find_fig10_page_text(pdf_path)
+    # ---------- 1) CHOIX DE LA PAGE (robuste) ----------
+    page_txt, _ = _find_fig10_page_text(pdf_path)   # <<<<<< UTILISER le helper robuste
     target = _fix_tokens(page_txt)
 
-    # --- 2) découpe en 4 blocs (ancres pays sinon 4 x 'Demand') ---
-    patterns: dict[str, str] = {}
-    for c in countries:
-        nxt = [k for k in countries if k != c]
-        end_pat = r"(?:" + r"|".join(map(re.escape, nxt + ["Source:"])) + r")"
-        m = re.search(rf"{re.escape(c)}[\s\S]*?(?={end_pat})", target)
-        if m:
-            patterns[c] = m.group(0)
-        else:
-            mt = re.search(rf"{re.escape(c)}[\s\S]*$", target)
-            if mt:
-                patterns[c] = mt.group(0)
-    if len(patterns) < 4:
-        starts = [m.start() for m in re.finditer(r"\bDemand\b", target)]
-        if len(starts) >= 4:
-            starts = starts[:4] + [len(target)]
-            for i in range(4):
-                patterns[countries[i]] = target[starts[i]:starts[i+1]]
-        else:
-            raise RuntimeError("Fig.10: cannot split page (no anchors, <4 'Demand').")
+    # ---------- 2) DÉCOUPE EN 4 BLOCS ----------
+    def split_country_blocks(text: str) -> dict[str, str]:
+        blocks: dict[str, str] = {}
 
-    # --- 3) extraction numérique ---
+        # (a) ancres pays (idéal)
+        anchors = []
+        for c in countries:
+            m = re.search(rf"(?<![A-Za-z]){re.escape(c)}(?![A-Za-z])", text, flags=re.I)
+            if m:
+                anchors.append((m.start(), c))
+        anchors.sort()
+        for i, (start, c) in enumerate(anchors):
+            end = anchors[i+1][0] if i+1 < len(anchors) else len(text)
+            blocks[c] = text[start:end]
+
+        # (b) fallback: 3 premiers 'Demand' pour NL/BE/IT + ancre 'Total'
+        if len(blocks) < 4:
+            ds = [m.start() for m in re.finditer(r"(?<![A-Za-z])Demand(?![A-Za-z])", text, flags=re.I)]
+            m_total = re.search(r"(?<![A-Za-z])Total(?![A-Za-z])", text, flags=re.I)
+            if len(ds) >= 3:
+                ends = ds[1:4] + [m_total.start() if m_total else len(text)]
+                names = ["Netherlands", "Belgium", "Italy"]
+                for name, s, e in zip(names, ds[:3], ends):
+                    blocks[name] = text[s:e]
+                if m_total:
+                    m_src = re.search(r"(?<![A-Za-z])Source:(?![A-Za-z])", text, flags=re.I)
+                    blocks["Total"] = text[m_total.start():(m_src.start() if m_src else len(text))]
+
+        return blocks
+
+    patterns = split_country_blocks(target)
+    # NE PLUS planter si incomplet : on remplira avec des zéros
+    for c in countries:
+        patterns.setdefault(c, "")
+
+    # ---------- 3) Extraction ----------
     data: dict[str, dict] = {}
     for c, raw_block in patterns.items():
         block = _fix_tokens(raw_block)
-        d = {
-            "Balance_total": _extract_country_balance_row(target, c),
-            "Demand": {}, "Supply": {},
-            "Demand_parts": {}, "Supply_parts": {}
-        }
+        d = {"Balance_total": _extract_country_balance_row(target, c),
+             "Demand": {}, "Supply": {}, "Demand_parts": {}, "Supply_parts": {}}
         for grade in ["HSFO", "LSFO"]:
-            inl, bun = _extract_demand_parts(block, grade)
+            inl, bun = _extract_demand_parts(block, grade) if block else ([0]*8, [0]*8)
             d["Demand_parts"][grade] = {"Inland": inl, "Bunkers": bun}
             d["Demand"][grade] = [inl[i] + bun[i] for i in range(8)]
-
-            ref_s, blend_s = _extract_supply_parts(block, grade)
+            ref_s, blend_s = _extract_supply_parts(block, grade) if block else ([0]*8, [0]*8)
             d["Supply_parts"][grade] = {"Ref": ref_s, "Blend": blend_s}
             d["Supply"][grade] = [ref_s[i] + blend_s[i] for i in range(8)]
-
-            d[f"Balance_{grade}"] = [
-                (ref_s[i] + blend_s[i]) - (inl[i] + bun[i]) for i in range(8)
-            ]
+            d[f"Balance_{grade}"] = [(ref_s[i] + blend_s[i]) - (inl[i] + bun[i]) for i in range(8)]
         data[c] = d
 
     return data
+
 
 
 def _to_tidy_dataframe(parsed: dict) -> pd.DataFrame:
