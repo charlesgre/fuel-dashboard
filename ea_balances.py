@@ -335,7 +335,6 @@ def _parse_fig10(pdf_path: Path) -> dict:
     return out
 
 
-
 def _to_tidy_dataframe(parsed: dict) -> pd.DataFrame:
     rows = []
     for c in COUNTRIES:
