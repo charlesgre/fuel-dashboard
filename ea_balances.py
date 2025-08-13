@@ -5,12 +5,27 @@ import pandas as pd
 import pdfplumber
 import plotly.graph_objects as go
 
-# Utilise d'abord la variable d'environnement EA_PDF_DIR.
-# Sinon, on retombe sur le chemin UNC Windows (utile en local).
-BASE_PDF_DIR = Path(os.getenv(
-    "EA_PDF_DIR",
-    r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\EA balances"
-))
+# Dossier par défaut = dossier local du projet: "<repo>/EA balances"
+REPO_ROOT = Path(__file__).resolve().parent
+LOCAL_DEFAULT = REPO_ROOT / "EA balances"
+
+# 1) Si EA_PDF_DIR est défini, on l'utilise tel quel
+EA_ENV = os.getenv("EA_PDF_DIR")
+
+# 2) Sinon: Windows -> UNC ; Linux/Mac -> dossier local dans le repo
+if EA_ENV:
+    BASE_PDF_DIR = Path(EA_ENV)
+else:
+    if platform.system() == "Windows":
+        BASE_PDF_DIR = Path(r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\EA balances")
+    else:
+        BASE_PDF_DIR = LOCAL_DEFAULT
+
+# Protection: si on n'est PAS sous Windows et que l'env pointe vers un UNC, on rebascule en local
+if platform.system() != "Windows":
+    s = str(BASE_PDF_DIR)
+    if s.startswith("\\") or s.startswith("//"):
+        BASE_PDF_DIR = LOCAL_DEFAULT
 
 COUNTRIES = ["Netherlands", "Belgium", "Italy", "Total"]
 QUARTERS  = ["Q1", "Q2", "Q3", "Q4"]
