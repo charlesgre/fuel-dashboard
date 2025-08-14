@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pdfplumber
 import plotly.graph_objects as go
+from datetime import datetime
 
 # ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
 PARSER_VERSION = "ea_parser_v20"
@@ -144,27 +145,42 @@ def _extract_country_balance_agg(page_text: str, country: str) -> list[int]:
     return [_parse_tok(v) for v in m.groups()] if m else [0]*8
 
 # ---------- Fichiers ----------
+NAME_DATE_RE = re.compile(r"Fuel balances (\d{2})\.(\d{2})\.(\d{4})\.pdf$", re.I)
+
+def _date_from_name(p: Path) -> datetime | None:
+    m = NAME_DATE_RE.search(p.name)
+    if not m:
+        return None
+    d, mth, y = map(int, m.groups())
+    try:
+        return datetime(y, mth, d)
+    except ValueError:
+        return None
+
 def _get_latest_pdf_file() -> Path:
     if not BASE_PDF_DIR.exists():
         raise FileNotFoundError(
             "Répertoire introuvable pour EA PDFs : "
-            f"{BASE_PDF_DIR}\n"
-            f"OS={platform.system()} | cwd={Path.cwd()}\n"
-            "En environnement Linux/Cloud, le partage UNC Windows n'est pas monté. "
-            "Définis EA_PDF_DIR vers un dossier local accessible au runtime."
+            f"{BASE_PDF_DIR}\nOS={platform.system()} | cwd={Path.cwd()}\n"
+            "Sur Linux/Cloud, le partage UNC Windows n'est pas monté. "
+            "Définis EA_PDF_DIR vers un dossier local/posé en POSIX."
         )
-    pdfs = glob.glob(str(BASE_PDF_DIR / "*.pdf"))
+
+    pdfs = list((BASE_PDF_DIR).glob("*.pdf"))
     if not pdfs:
         try:
             listing = "\n".join([p.name for p in sorted(BASE_PDF_DIR.iterdir())][:20])
         except Exception:
             listing = "(lecture du dossier impossible)"
-        raise FileNotFoundError(
-            f"Aucun PDF trouvé dans {BASE_PDF_DIR}\n"
-            f"Contenu du dossier (extrait):\n{listing}"
-        )
-    latest = max(pdfs, key=os.path.getmtime)
-    return Path(latest)
+        raise FileNotFoundError(f"Aucun PDF trouvé dans {BASE_PDF_DIR}\n{listing}")
+
+    # 1) Try by date found in filename
+    dated = [(dt, p) for p in pdfs if (dt := _date_from_name(p)) is not None]
+    if dated:
+        return max(dated, key=lambda t: t[0])[1]
+
+    # 2) Fallback to modification time
+    return max(pdfs, key=lambda p: p.stat().st_mtime)
 
 # ---------- Localisation fiable de la vraie page Fig.10 ----------
 def _find_fig10_page_text(pdf_path: Path) -> tuple[str, int]:
