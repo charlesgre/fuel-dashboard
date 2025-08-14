@@ -8,7 +8,6 @@ import streamlit as st
 
 from generate_charts import generate_price_charts
 from bunker_diff import plot_bunker_price_diffs
-from cdd_temperatures import get_all_cdd_figures
 from fge_balances import plot_fge_balances, load_fge_balances
 from forward_curves import generate_forward_curves_tab
 from forward_curves_us import generate_us_forward_curves_tab
@@ -19,7 +18,7 @@ from generate_stocks_tab import generate_stocks_tab
 st.set_page_config(page_title="Fuel Dashboard", layout="wide")
 st.title("📊 Fuel Dashboard")
 
-# ------------ Config EA_PDF_DIR (doit être fait AVANT d'importer ea_balances) ------------
+# ------------ Config EA_PDF_DIR (AVANT d'importer ea_balances) ------------
 repo_root = Path(__file__).resolve().parent
 local_default = repo_root / "EA balances"   # dossier DU REPO (doit exister en prod)
 
@@ -34,75 +33,19 @@ if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startsw
 os.environ["EA_PDF_DIR"] = EA_DIR
 st.caption(f"EA_PDF_DIR utilisé: {EA_DIR}")
 
-try:
-    # ce fichier est celui que le parseur va VRAIMENT utiliser
-    parser_pdf = _ea_pick_by_name_date()
-    st.info(f"EA – PDF choisi par le parseur (date dans le nom): **{parser_pdf.name}**")
-except Exception as e:
-    st.warning(f"Impossible d'évaluer le PDF choisi par le parseur : {e}")
-
-# (facultatif) garde le bandeau mtime en complément pour comparer
-try:
-    p = Path(EA_DIR)
-    pdfs = sorted([x for x in p.glob("*") if x.is_file() and x.suffix.lower()==".pdf"],
-                  key=lambda x: x.stat().st_mtime, reverse=True)
-    if pdfs:
-        latest = pdfs[0]
-        st.caption(
-            f"(Info mtime) Plus récent par date de modification: {latest.name} | "
-            f"mtime={datetime.fromtimestamp(latest.stat().st_mtime)}"
-        )
-except Exception:
-    pass
-
-# >>> ajout debug: afficher le PDF le plus récent dans EA_DIR
-try:
-    p = Path(EA_DIR)
-    pdfs = sorted(p.glob("*.pdf"), key=lambda x: x.stat().st_mtime, reverse=True)
-    if pdfs:
-        latest = pdfs[0]
-        st.info(
-            f"EA – PDF sélectionné (plus récent): **{latest.name}** | "
-            f"mtime={datetime.fromtimestamp(latest.stat().st_mtime)}"
-        )
-    else:
-        st.warning("Aucun fichier PDF trouvé dans ce dossier.")
-except Exception as e:
-    st.warning(f"Impossible de lister {EA_DIR} : {e}")
-
-# Debug rapide pour voir ce que le runtime voit
-with st.expander("EA debug"):
-    p = Path(EA_DIR)
-    st.write("OS:", platform.system(), "| CWD:", Path.cwd())
-    st.write("Existe:", p.exists())
-    try:
-        st.write("Fichiers (extrait):", [x.name for x in p.glob("*.pdf")][:10])
-    except Exception as e:
-        st.write("Listing impossible:", e)
-
-# >>> ajout alerte UNC sur Linux
-if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startswith("//")):
-    st.error(
-        "Chemin UNC détecté sur un runtime Linux : ce n'est **pas accessible** directement.\n"
-        "➡️ Soit copie le PDF dans le dossier local du repo "
-        f"({(Path(__file__).resolve().parent / 'EA balances').as_posix()}), "
-        "soit monte le partage réseau et mets ce **chemin POSIX monté** dans EA_PDF_DIR."
-    )
-
 # ⚠️ Import APRÈS config du path
 from ea_balances import (  # noqa: E402
     load_ea_data as _load_ea_data,
     plot_ea,
     PARSER_VERSION,
-    _get_latest_pdf_file as _ea_pick_by_name_date,  # <— importe le pickeur réel
+    _get_latest_pdf_file as pick_ea_pdf,  # ← pickeur utilisé dans l'onglet EA
 )
-
 
 # ------------ Cache EA dépendant de la version du parseur ------------
 @st.cache_data(show_spinner=False)
 def get_ea_data_cached(_parser_version: str):
     """
-    Le paramètre _parser_version est uniquement là pour 'vider' le cache.
+    Le paramètre _parser_version est uniquement là pour vider le cache.
     Dès que PARSER_VERSION change dans ea_balances.py, le cache est invalidé.
     """
     return _load_ea_data()
@@ -134,6 +77,7 @@ with tab2:
 with tab3:
     st.header("CDD / Temperatures")
 
+    # import paresseux + gestion d’erreurs propre
     try:
         from cdd_temperatures import get_all_cdd_figures
     except ModuleNotFoundError as e:
@@ -204,6 +148,34 @@ with tab4:
 
     else:
         st.subheader("EA (Europe fuel oil – Fig.10)")
+
+        # --- Bandeau d’info *uniquement* dans cet onglet ---
+        with st.expander("EA – PDF utilisé (debug)", expanded=False):
+            try:
+                pdf_path = pick_ea_pdf()  # ← sélection par date dans le nom (fallback mtime)
+                st.info(f"PDF choisi par le parseur : **{pdf_path.name}**")
+                # Optionnel : comparaison avec le plus récent par mtime
+                try:
+                    p = Path(EA_DIR)
+                    latest_mtime = max(
+                        (x for x in p.glob("*.pdf") if x.is_file()),
+                        key=lambda x: x.stat().st_mtime
+                    )
+                    ts = datetime.fromtimestamp(latest_mtime.stat().st_mtime)
+                    st.caption(f"(par mtime) Plus récent : {latest_mtime.name} | mtime={ts}")
+                except Exception:
+                    pass
+                # Petit listing utile
+                with st.expander("Lister quelques PDFs du dossier"):
+                    try:
+                        p = Path(EA_DIR)
+                        st.write([x.name for x in sorted(p.glob('*.pdf'))[:10]])
+                    except Exception as e:
+                        st.write(f"Listing impossible : {e}")
+            except Exception as e:
+                st.warning(f"Impossible d’évaluer le PDF choisi : {e}")
+        # ----------------------------------------------------
+
         c1, c2, c3 = st.columns([1, 1, 3])
         with c1:
             metric = st.selectbox("Metric", ["Balance", "Demand", "Supply"], index=0)
@@ -211,7 +183,6 @@ with tab4:
             grade = st.radio("Grade", ["HSFO", "LSFO"], index=0, horizontal=True)
         with c3:
             if st.button("🔄 Reparser EA (clear cache)"):
-
                 get_ea_data_cached.clear()
                 try:
                     st.rerun()
@@ -220,6 +191,7 @@ with tab4:
 
         with st.spinner("Chargement EA…"):
             try:
+                # 👇 le cache dépend de la version du parseur
                 ea_data = get_ea_data_cached(PARSER_VERSION)
             except FileNotFoundError as e:
                 st.error(f"EA_PDF_DIR: {EA_DIR}\n{e}")
