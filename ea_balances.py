@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 
 # ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
-PARSER_VERSION = "ea_parser_v20"
+PARSER_VERSION = "ea_parser_v21"
 
 # ---------- Chemins ----------
 REPO_ROOT = Path(__file__).resolve().parent
@@ -145,10 +145,11 @@ def _extract_country_balance_agg(page_text: str, country: str) -> list[int]:
     return [_parse_tok(v) for v in m.groups()] if m else [0]*8
 
 # ---------- Fichiers ----------
-NAME_DATE_RE = re.compile(r"Fuel balances (\d{2})\.(\d{2})\.(\d{4})\.pdf$", re.I)
+# tolère .pdf / .PDF + espaces
+NAME_DATE_RE = re.compile(r"^Fuel balances\s+(\d{2})\.(\d{2})\.(\d{4})\.pdf$", re.I)
 
 def _date_from_name(p: Path) -> datetime | None:
-    m = NAME_DATE_RE.search(p.name)
+    m = NAME_DATE_RE.search(p.name.strip())
     if not m:
         return None
     d, mth, y = map(int, m.groups())
@@ -156,6 +157,10 @@ def _date_from_name(p: Path) -> datetime | None:
         return datetime(y, mth, d)
     except ValueError:
         return None
+
+def _list_pdfs_case_insensitive(folder: Path) -> list[Path]:
+    # prend tout et filtre par suffix .pdf (insensible à la casse)
+    return [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"]
 
 def _get_latest_pdf_file() -> Path:
     if not BASE_PDF_DIR.exists():
@@ -166,7 +171,7 @@ def _get_latest_pdf_file() -> Path:
             "Définis EA_PDF_DIR vers un dossier local/posé en POSIX."
         )
 
-    pdfs = list((BASE_PDF_DIR).glob("*.pdf"))
+    pdfs = _list_pdfs_case_insensitive(BASE_PDF_DIR)
     if not pdfs:
         try:
             listing = "\n".join([p.name for p in sorted(BASE_PDF_DIR.iterdir())][:20])
@@ -174,12 +179,14 @@ def _get_latest_pdf_file() -> Path:
             listing = "(lecture du dossier impossible)"
         raise FileNotFoundError(f"Aucun PDF trouvé dans {BASE_PDF_DIR}\n{listing}")
 
-    # 1) Try by date found in filename
+    # 1) Tri par date trouvée dans le NOM (prioritaire)
     dated = [(dt, p) for p in pdfs if (dt := _date_from_name(p)) is not None]
     if dated:
-        return max(dated, key=lambda t: t[0])[1]
+        dated.sort(key=lambda t: t[0])           # du plus ancien au plus récent
+        chosen = dated[-1][1]                    # le plus récent par nom
+        return chosen
 
-    # 2) Fallback to modification time
+    # 2) Fallback au mtime si aucune date n'est trouvée dans les noms
     return max(pdfs, key=lambda p: p.stat().st_mtime)
 
 # ---------- Localisation fiable de la vraie page Fig.10 ----------

@@ -34,6 +34,27 @@ if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startsw
 os.environ["EA_PDF_DIR"] = EA_DIR
 st.caption(f"EA_PDF_DIR utilisé: {EA_DIR}")
 
+try:
+    # ce fichier est celui que le parseur va VRAIMENT utiliser
+    parser_pdf = _ea_pick_by_name_date()
+    st.info(f"EA – PDF choisi par le parseur (date dans le nom): **{parser_pdf.name}**")
+except Exception as e:
+    st.warning(f"Impossible d'évaluer le PDF choisi par le parseur : {e}")
+
+# (facultatif) garde le bandeau mtime en complément pour comparer
+try:
+    p = Path(EA_DIR)
+    pdfs = sorted([x for x in p.glob("*") if x.is_file() and x.suffix.lower()==".pdf"],
+                  key=lambda x: x.stat().st_mtime, reverse=True)
+    if pdfs:
+        latest = pdfs[0]
+        st.caption(
+            f"(Info mtime) Plus récent par date de modification: {latest.name} | "
+            f"mtime={datetime.fromtimestamp(latest.stat().st_mtime)}"
+        )
+except Exception:
+    pass
+
 # >>> ajout debug: afficher le PDF le plus récent dans EA_DIR
 try:
     p = Path(EA_DIR)
@@ -72,8 +93,10 @@ if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startsw
 from ea_balances import (  # noqa: E402
     load_ea_data as _load_ea_data,
     plot_ea,
-    PARSER_VERSION,   # utilisé pour clé de cache
+    PARSER_VERSION,
+    _get_latest_pdf_file as _ea_pick_by_name_date,  # <— importe le pickeur réel
 )
+
 
 # ------------ Cache EA dépendant de la version du parseur ------------
 @st.cache_data(show_spinner=False)
