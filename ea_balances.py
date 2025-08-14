@@ -18,7 +18,7 @@ if EA_ENV:
     BASE_PDF_DIR = Path(EA_ENV)
 else:
     if platform.system() == "Windows":
-        BASE_PDF_DIR = Path(r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\EA balances")
+        BASE_PDF_DIR = Path(r"\\gvaps1\USR6\CHGE\desktop\Fuel desk\EA vs FGE balance\EA balances")
     else:
         BASE_PDF_DIR = LOCAL_DEFAULT
 
