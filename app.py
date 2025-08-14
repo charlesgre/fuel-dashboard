@@ -34,6 +34,21 @@ if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startsw
 os.environ["EA_PDF_DIR"] = EA_DIR
 st.caption(f"EA_PDF_DIR utilisé: {EA_DIR}")
 
+# >>> ajout debug: afficher le PDF le plus récent dans EA_DIR
+try:
+    p = Path(EA_DIR)
+    pdfs = sorted(p.glob("*.pdf"), key=lambda x: x.stat().st_mtime, reverse=True)
+    if pdfs:
+        latest = pdfs[0]
+        st.info(
+            f"EA – PDF sélectionné (plus récent): **{latest.name}** | "
+            f"mtime={datetime.fromtimestamp(latest.stat().st_mtime)}"
+        )
+    else:
+        st.warning("Aucun fichier PDF trouvé dans ce dossier.")
+except Exception as e:
+    st.warning(f"Impossible de lister {EA_DIR} : {e}")
+
 # Debug rapide pour voir ce que le runtime voit
 with st.expander("EA debug"):
     p = Path(EA_DIR)
@@ -43,6 +58,15 @@ with st.expander("EA debug"):
         st.write("Fichiers (extrait):", [x.name for x in p.glob("*.pdf")][:10])
     except Exception as e:
         st.write("Listing impossible:", e)
+
+# >>> ajout alerte UNC sur Linux
+if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startswith("//")):
+    st.error(
+        "Chemin UNC détecté sur un runtime Linux : ce n'est **pas accessible** directement.\n"
+        "➡️ Soit copie le PDF dans le dossier local du repo "
+        f"({(Path(__file__).resolve().parent / 'EA balances').as_posix()}), "
+        "soit monte le partage réseau et mets ce **chemin POSIX monté** dans EA_PDF_DIR."
+    )
 
 # ⚠️ Import APRÈS config du path
 from ea_balances import (  # noqa: E402
@@ -55,7 +79,7 @@ from ea_balances import (  # noqa: E402
 @st.cache_data(show_spinner=False)
 def get_ea_data_cached(_parser_version: str):
     """
-    Le paramètre _parser_version est uniquement là pour 'cléer' le cache.
+    Le paramètre _parser_version est uniquement là pour 'vider' le cache.
     Dès que PARSER_VERSION change dans ea_balances.py, le cache est invalidé.
     """
     return _load_ea_data()
@@ -87,7 +111,6 @@ with tab2:
 with tab3:
     st.header("CDD / Temperatures")
 
-    # import paresseux + debug propre
     try:
         from cdd_temperatures import get_all_cdd_figures
     except ModuleNotFoundError as e:
@@ -130,7 +153,6 @@ with tab3:
             st.plotly_chart(fig, use_container_width=True, key=f"saudi_cdd_{i}")
         col_idx = (col_idx + 1) % 3
 
-
 # === TAB 4: BALANCES (FGE / EA) ===
 with tab4:
     st.header("Seasonal Balances – FGE & EA")
@@ -166,6 +188,7 @@ with tab4:
             grade = st.radio("Grade", ["HSFO", "LSFO"], index=0, horizontal=True)
         with c3:
             if st.button("🔄 Reparser EA (clear cache)"):
+
                 get_ea_data_cached.clear()
                 try:
                     st.rerun()
@@ -174,7 +197,6 @@ with tab4:
 
         with st.spinner("Chargement EA…"):
             try:
-                # 👇 le cache dépend de la version du parseur
                 ea_data = get_ea_data_cached(PARSER_VERSION)
             except FileNotFoundError as e:
                 st.error(f"EA_PDF_DIR: {EA_DIR}\n{e}")

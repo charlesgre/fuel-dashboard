@@ -7,7 +7,7 @@ import pdfplumber
 import plotly.graph_objects as go
 
 # ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
-PARSER_VERSION = "ea_parser_v19"
+PARSER_VERSION = "ea_parser_v20"
 
 # ---------- Chemins ----------
 REPO_ROOT = Path(__file__).resolve().parent
@@ -178,58 +178,31 @@ def _find_fig10_page_text(pdf_path: Path) -> tuple[str, int]:
     raise RuntimeError("Fig.10 not found in the PDF.")
 
 def _parse_fig10(pdf_path: Path) -> dict:
+    """
+    Reprend EXACTEMENT la logique du script 'EA balances scrapper' qui fonctionne :
+    - utilise le texte brut de la page Fig.10 SANS normalisation ni alias
+    - découpe chaque bloc pays par lookahead vers (autres pays|Source:)
+    - parse Demand/Supply avec Ref. Supply / Blending / Inland / Bunkers (8 valeurs)
+    """
     import re
 
     countries = ["Netherlands", "Belgium", "Italy", "Total"]
 
-    # === 1) récupérer le texte brut de la page Fig.10
+    # 1) Récupérer le texte brut de la page Fig.10 (même détection que le scrapper)
     target_page_text, _ = _find_fig10_page_text(pdf_path)
 
-    # ✅ Normalisation pour corriger "N e t h e r l a n d s", NBSP, tirets, etc.
-    page = _collapse_spaced_words(_norm_text(target_page_text))
+    # 2) Split en 4 blocs pays (identique au scrapper)
+    patterns: dict[str, str] = {}
+    for c in countries:
+        next_keywords = [k for k in countries if k != c]
+        end_pat = r"(?:" + r"|".join(map(re.escape, next_keywords + ["Source:"])) + r")"
+        m = re.search(rf"{re.escape(c)}[\s\S]*?(?={end_pat})", target_page_text)
+        if not m:
+            # même message que le scrapper
+            raise RuntimeError(f"Block for {c} not found.")
+        patterns[c] = m.group(0)
 
-    print("[EA][Fig10] first 300 chars:\\n" + page[:300])
-
-    # === helpers alias
-    def _alias_union(country: str) -> str:
-        pats = COUNTRY_ALIASES.get(country, [re.escape(country)])
-        return "(?:" + "|".join(pats) + ")"
-
-    # === 2) découper les 4 blocs pays en se basant sur les positions des en-têtes
-    #    (plus robuste que le lookahead avec end_pat)
-    def _split_country_blocks(page_text: str) -> dict[str, str]:
-        # find first index for each country by scanning its aliases separately
-        first_pos: dict[str, int] = {}
-        for c in countries:
-            best = None
-            for pat in COUNTRY_ALIASES.get(c, [re.escape(c)]):
-                m = re.search(pat, page_text, flags=re.I)
-                if m:
-                    pos = m.start()
-                    if best is None or pos < best:
-                        best = pos
-            if best is not None:
-                first_pos[c] = best
-
-        missing = [c for c in countries if c not in first_pos]
-        if missing:
-            raise RuntimeError(f"Country headers not found on Fig.10 page: {missing}")
-
-        order = sorted(first_pos.items(), key=lambda kv: kv[1])
-        src = re.search(r"Source:", page_text, flags=re.I)
-        end_default = src.start() if src else len(page_text)
-
-        blocks: dict[str, str] = {}
-        for i, (c, start) in enumerate(order):
-            end = order[i+1][1] if i + 1 < len(order) else end_default
-            blocks[c] = page_text[start:end]
-        return blocks
-
-
-    patterns: dict[str, str] = _split_country_blocks(page)
-
-
-    # === 3) helpers de parsing (identiques à ton script)
+    # 3) helpers parsing (calqués)
     tok  = r"(\(?-?\d[\d,]*\)?|--)"
     tok8 = rf"{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}"
 
@@ -248,7 +221,7 @@ def _parse_fig10(pdf_path: Path) -> dict:
         else:
             m = re.search(r"\bSupply\s+(.*)$", block, flags=re.S)
         if not m:
-            raise RuntimeError(f"Section '{section}' introuvable dans bloc pays.")
+            raise RuntimeError(f"Section '{section}' introuvable.")
         return m.group(1)
 
     def _demand_grade_slice(demand_text: str, grade: str) -> str:
@@ -276,7 +249,7 @@ def _parse_fig10(pdf_path: Path) -> dict:
     def _extract_supply_parts(country_block: str, grade: str):
         sup = _section_slice(country_block, "Supply")
 
-        # Ref. Supply {grade} (jusqu'à 'Blending' ou fin)
+        # Ref. Supply {grade}
         ref_vals = [0]*8
         m_ref_blk = re.search(r"Ref\.?\s*Supply\s+(.*?)(?:\n\s*Blending\b|\Z)", sup, flags=re.S)
         if m_ref_blk:
@@ -288,7 +261,7 @@ def _parse_fig10(pdf_path: Path) -> dict:
         if m_bl_blk:
             blend_vals = _extract_subline(m_bl_blk.group(1), grade)
 
-        # Fallback: si Ref et Blending absents, prendre ligne directe "<grade> ..."
+        # Fallback: ligne directe "<grade> ..."
         if all(v == 0 for v in ref_vals) and all(v == 0 for v in blend_vals):
             m_dir = re.search(rf"^\s*{grade}\b\s+{tok8}", sup, flags=re.M)
             if m_dir:
@@ -297,37 +270,30 @@ def _parse_fig10(pdf_path: Path) -> dict:
 
         return ref_vals, blend_vals
 
-    def _extract_country_balance_agg(country: str) -> list[int]:
-        tok  = r"(\(?-?\d[\d,]*\)?|--)"
-        tok8 = rf"{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}"
-        # union of the current country’s aliases
-        alias_union = "(?:" + "|".join(COUNTRY_ALIASES.get(country, [re.escape(country)])) + ")"
-        m = re.search(rf"{alias_union}\s+{tok8}", page, flags=re.I)
+    def _extract_country_balance_agg(page_text: str, country: str) -> list[int]:
+        m = re.search(rf"{re.escape(country)}\s+{tok8}", page_text)
         if not m:
             raise RuntimeError(f"Balance agrégée introuvable pour {country}.")
         return [_parse_tok(v) for v in m.groups()]
 
-    # === 4) construire la structure attendue par le reste de l'app
+    # 4) Build dict identique au scrapper
     data: dict[str, dict] = {}
     for c, block in patterns.items():
         d = {
-            "Balance_total": _extract_country_balance_agg(c),  # ← ici
+            "Balance_total": _extract_country_balance_agg(target_page_text, c),
             "Demand": {}, "Supply": {},
             "Demand_parts": {}, "Supply_parts": {}
         }
 
         for grade in ["HSFO", "LSFO"]:
-            # DEMAND = Inland + Bunkers
             inland_d, bunkers_d = _extract_demand_parts(block, grade)
             d["Demand_parts"][grade] = {"Inland": inland_d, "Bunkers": bunkers_d}
             d["Demand"][grade] = [inland_d[i] + bunkers_d[i] for i in range(8)]
 
-            # SUPPLY = Ref. Supply + Blending (fallback ligne directe)
             ref_s, blend_s = _extract_supply_parts(block, grade)
             d["Supply_parts"][grade] = {"Ref": ref_s, "Blend": blend_s}
             d["Supply"][grade] = [ref_s[i] + blend_s[i] for i in range(8)]
 
-            # BALANCE(grade)
             d[f"Balance_{grade}"] = [
                 (ref_s[i] + blend_s[i]) - (inland_d[i] + bunkers_d[i]) for i in range(8)
             ]
@@ -335,6 +301,7 @@ def _parse_fig10(pdf_path: Path) -> dict:
         data[c] = d
 
     return data
+
 
 
 
