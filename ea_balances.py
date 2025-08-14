@@ -7,7 +7,7 @@ import pdfplumber
 import plotly.graph_objects as go
 
 # ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
-PARSER_VERSION = "ea_parser_v17"
+PARSER_VERSION = "ea_parser_v18"
 
 # ---------- Chemins ----------
 REPO_ROOT = Path(__file__).resolve().parent
@@ -180,25 +180,46 @@ def _parse_fig10(pdf_path: Path) -> dict:
     # ✅ Normalisation pour corriger "N e t h e r l a n d s", NBSP, tirets, etc.
     page = _collapse_spaced_words(_norm_text(target_page_text))
 
-    # helper pour alias
+    # === helpers alias
     def _alias_union(country: str) -> str:
         pats = COUNTRY_ALIASES.get(country, [re.escape(country)])
         return "(?:" + "|".join(pats) + ")"
 
-    # === 2) découper en 4 blocs pays (avec alias et lookahead sur alias + Source:)
-    patterns: dict[str, str] = {}
-    for c in countries:
-        next_aliases = []
-        for k in countries:
-            if k != c:
-                next_aliases += COUNTRY_ALIASES.get(k, [re.escape(k)])
-        end_pat = "(?:" + "|".join(next_aliases + [r"Source:"]) + ")"
-        start_pat = _alias_union(c)
-        m = re.search(rf"{start_pat}[\s\S]*?(?={end_pat})", page, flags=re.S | re.I)
-        if not m:
-            # aide au debug : montre le début de page
-            raise RuntimeError(f"Block for {c} not found on Fig.10 page.")
-        patterns[c] = m.group(0)
+    # === 2) découper les 4 blocs pays en se basant sur les positions des en-têtes
+    #    (plus robuste que le lookahead avec end_pat)
+    def _split_country_blocks(page_text: str) -> dict[str, str]:
+        parts = []
+        for c in countries:
+            parts.append(f"(?P<{c}>" + "|".join(COUNTRY_ALIASES[c]) + ")")
+        union = re.compile("|".join(parts), flags=re.I)
+
+        # repère la 1ère occurrence de chaque pays
+        first_pos = {}
+        hits = []
+        for m in union.finditer(page_text):
+            for c in countries:
+                if m.group(c):
+                    if c not in first_pos:
+                        first_pos[c] = m.start()
+                    break
+
+        # si un pays manque, on échoue explicitement (message clair)
+        missing = [c for c in countries if c not in first_pos]
+        if missing:
+            raise RuntimeError(f"Country headers not found on Fig.10 page: {missing}")
+
+        # bornes de fin = prochain header, ou 'Source:' pour le dernier
+        order = sorted(((c, first_pos[c]) for c in countries), key=lambda x: x[1])
+        src = re.search(r"Source:", page_text, flags=re.I)
+        end_default = src.start() if src else len(page_text)
+
+        blocks = {}
+        for i, (c, start) in enumerate(order):
+            end = order[i+1][1] if i+1 < len(order) else end_default
+            blocks[c] = page_text[start:end]
+        return blocks
+
+    patterns: dict[str, str] = _split_country_blocks(page)
 
 
     # === 3) helpers de parsing (identiques à ton script)
@@ -269,20 +290,20 @@ def _parse_fig10(pdf_path: Path) -> dict:
 
         return ref_vals, blend_vals
 
-    # 2) Rendre l’agrégat pays tolérant aux alias (toujours dans _parse_fig10)
-        def _extract_country_balance_agg(page_text: str, country: str) -> list[int]:
-            # page_text = texte NORMALISÉ ici
-            alias_pat = _alias_union(country)
-            m = re.search(rf"{alias_pat}\s+{tok8}", page, flags=re.I)
-            if not m:
-                raise RuntimeError(f"Balance agrégée introuvable pour {country}.")
-            return [_parse_tok(v) for v in m.groups()]
+    def _extract_country_balance_agg(country: str) -> list[int]:
+        tok  = r"(\(?-?\d[\d,]*\)?|--)"
+        tok8 = rf"{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}"
+        alias_pat = _alias_union(country)
+        m = re.search(rf"{alias_pat}\s+{tok8}", page, flags=re.I)
+        if not m:
+            raise RuntimeError(f"Balance agrégée introuvable pour {country}.")
+        return [_parse_tok(v) for v in m.groups()]
 
     # === 4) construire la structure attendue par le reste de l'app
     data: dict[str, dict] = {}
     for c, block in patterns.items():
         d = {
-            "Balance_total": _extract_country_balance_agg(target_page_text, c),
+            "Balance_total": _extract_country_balance_agg(c),  # ← ici
             "Demand": {}, "Supply": {},
             "Demand_parts": {}, "Supply_parts": {}
         }
