@@ -7,7 +7,7 @@ import pdfplumber
 import plotly.graph_objects as go
 
 # ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
-PARSER_VERSION = "ea_parser_v16"
+PARSER_VERSION = "ea_parser_v17"
 
 # ---------- Chemins ----------
 REPO_ROOT = Path(__file__).resolve().parent
@@ -170,29 +170,36 @@ def _find_fig10_page_text(pdf_path: Path) -> tuple[str, int]:
     raise RuntimeError("Fig.10 not found in the PDF.")
 
 def _parse_fig10(pdf_path: Path) -> dict:
-    """
-    Version alignée sur le script 'qui marche' :
-    - utilise exactement le texte de la page qui contient 'Fig 10: Europe fuel oil balance by grade'
-    - découpe 4 blocs pays par lookahead vers (autres pays|Source:)
-    - parse Demand/Supply avec Ref. Supply / Blending / Inland / Bunkers (8 valeurs)
-    """
     import re
 
     countries = ["Netherlands", "Belgium", "Italy", "Total"]
 
-    # === 1) récupérer le texte brut de la page Fig.10 (sans normalisation agressive)
+    # === 1) récupérer le texte brut de la page Fig.10
     target_page_text, _ = _find_fig10_page_text(pdf_path)
 
-    # === 2) découper en 4 blocs pays (comme ton script)
+    # ✅ Normalisation pour corriger "N e t h e r l a n d s", NBSP, tirets, etc.
+    page = _collapse_spaced_words(_norm_text(target_page_text))
+
+    # helper pour alias
+    def _alias_union(country: str) -> str:
+        pats = COUNTRY_ALIASES.get(country, [re.escape(country)])
+        return "(?:" + "|".join(pats) + ")"
+
+    # === 2) découper en 4 blocs pays (avec alias et lookahead sur alias + Source:)
     patterns: dict[str, str] = {}
     for c in countries:
-        next_keywords = [k for k in countries if k != c]
-        end_pat = r"(?:" + r"|".join(map(re.escape, next_keywords + ["Source:"])) + r")"
-        m = re.search(rf"{re.escape(c)}[\s\S]*?(?={end_pat})", target_page_text)
+        next_aliases = []
+        for k in countries:
+            if k != c:
+                next_aliases += COUNTRY_ALIASES.get(k, [re.escape(k)])
+        end_pat = "(?:" + "|".join(next_aliases + [r"Source:"]) + ")"
+        start_pat = _alias_union(c)
+        m = re.search(rf"{start_pat}[\s\S]*?(?={end_pat})", page, flags=re.S | re.I)
         if not m:
-            # on préfère être explicite : si un bloc manque, mieux vaut remonter l'info
+            # aide au debug : montre le début de page
             raise RuntimeError(f"Block for {c} not found on Fig.10 page.")
         patterns[c] = m.group(0)
+
 
     # === 3) helpers de parsing (identiques à ton script)
     tok  = r"(\(?-?\d[\d,]*\)?|--)"
@@ -262,12 +269,14 @@ def _parse_fig10(pdf_path: Path) -> dict:
 
         return ref_vals, blend_vals
 
-    def _extract_country_balance_agg(page_text: str, country: str) -> list[int]:
-        m = re.search(rf"{re.escape(country)}\s+{tok8}", page_text)
-        if not m:
-            # sur ton PDF c'est présent — on le signale sinon
-            raise RuntimeError(f"Balance agrégée introuvable pour {country}.")
-        return [_parse_tok(v) for v in m.groups()]
+    # 2) Rendre l’agrégat pays tolérant aux alias (toujours dans _parse_fig10)
+        def _extract_country_balance_agg(page_text: str, country: str) -> list[int]:
+            # page_text = texte NORMALISÉ ici
+            alias_pat = _alias_union(country)
+            m = re.search(rf"{alias_pat}\s+{tok8}", page, flags=re.I)
+            if not m:
+                raise RuntimeError(f"Balance agrégée introuvable pour {country}.")
+            return [_parse_tok(v) for v in m.groups()]
 
     # === 4) construire la structure attendue par le reste de l'app
     data: dict[str, dict] = {}
