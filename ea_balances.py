@@ -7,7 +7,7 @@ import pdfplumber
 import plotly.graph_objects as go
 
 # ↑ Incrémente quand tu modifies ce fichier (le cache de l'app en tiendra compte)
-PARSER_VERSION = "ea_parser_v18"
+PARSER_VERSION = "ea_parser_v19"
 
 # ---------- Chemins ----------
 REPO_ROOT = Path(__file__).resolve().parent
@@ -33,11 +33,19 @@ QUARTERS  = ["Q1", "Q2", "Q3", "Q4"]
 
 # alias tolérés pour variations d’EA / extraction PDF
 COUNTRY_ALIASES: dict[str, list[str]] = {
-        "Netherlands": [r"Netherlands", r"The\s+Netherlands", r"\bNL\b"],
-        "Belgium":     [r"Belgium", r"\bBE\b"],
-        "Italy":       [r"Italy", r"\bIT\b"],
-        "Total":       [r"Total(?:\s*Europe)?", r"Europe\s*Total", r"EU\s*Total"],
-    }
+    # allow weird spacing and “TheNetherlands”
+    "Netherlands": [
+        r"Netherlands",
+        r"The\s*Netherlands",
+        r"Nether\s*lands",
+        r"Neth\s*erlands",
+        r"\bNL\b",
+    ],
+    "Belgium": [r"Belgium", r"\bBE\b"],
+    "Italy":   [r"Italy", r"\bIT\b"],
+    "Total":   [r"Total(?:\s*Europe)?", r"Europe\s*Total", r"EU\s*Total"],
+}
+
 
 
 _tok  = r"(\(?-?\d[\d,]*\)?|--)"
@@ -180,6 +188,8 @@ def _parse_fig10(pdf_path: Path) -> dict:
     # ✅ Normalisation pour corriger "N e t h e r l a n d s", NBSP, tirets, etc.
     page = _collapse_spaced_words(_norm_text(target_page_text))
 
+    print("[EA][Fig10] first 300 chars:\\n" + page[:300])
+
     # === helpers alias
     def _alias_union(country: str) -> str:
         pats = COUNTRY_ALIASES.get(country, [re.escape(country)])
@@ -188,36 +198,33 @@ def _parse_fig10(pdf_path: Path) -> dict:
     # === 2) découper les 4 blocs pays en se basant sur les positions des en-têtes
     #    (plus robuste que le lookahead avec end_pat)
     def _split_country_blocks(page_text: str) -> dict[str, str]:
-        parts = []
+        # find first index for each country by scanning its aliases separately
+        first_pos: dict[str, int] = {}
         for c in countries:
-            parts.append(f"(?P<{c}>" + "|".join(COUNTRY_ALIASES[c]) + ")")
-        union = re.compile("|".join(parts), flags=re.I)
+            best = None
+            for pat in COUNTRY_ALIASES.get(c, [re.escape(c)]):
+                m = re.search(pat, page_text, flags=re.I)
+                if m:
+                    pos = m.start()
+                    if best is None or pos < best:
+                        best = pos
+            if best is not None:
+                first_pos[c] = best
 
-        # repère la 1ère occurrence de chaque pays
-        first_pos = {}
-        hits = []
-        for m in union.finditer(page_text):
-            for c in countries:
-                if m.group(c):
-                    if c not in first_pos:
-                        first_pos[c] = m.start()
-                    break
-
-        # si un pays manque, on échoue explicitement (message clair)
         missing = [c for c in countries if c not in first_pos]
         if missing:
             raise RuntimeError(f"Country headers not found on Fig.10 page: {missing}")
 
-        # bornes de fin = prochain header, ou 'Source:' pour le dernier
-        order = sorted(((c, first_pos[c]) for c in countries), key=lambda x: x[1])
+        order = sorted(first_pos.items(), key=lambda kv: kv[1])
         src = re.search(r"Source:", page_text, flags=re.I)
         end_default = src.start() if src else len(page_text)
 
-        blocks = {}
+        blocks: dict[str, str] = {}
         for i, (c, start) in enumerate(order):
-            end = order[i+1][1] if i+1 < len(order) else end_default
+            end = order[i+1][1] if i + 1 < len(order) else end_default
             blocks[c] = page_text[start:end]
         return blocks
+
 
     patterns: dict[str, str] = _split_country_blocks(page)
 
@@ -293,8 +300,9 @@ def _parse_fig10(pdf_path: Path) -> dict:
     def _extract_country_balance_agg(country: str) -> list[int]:
         tok  = r"(\(?-?\d[\d,]*\)?|--)"
         tok8 = rf"{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}\s+{tok}"
-        alias_pat = _alias_union(country)
-        m = re.search(rf"{alias_pat}\s+{tok8}", page, flags=re.I)
+        # union of the current country’s aliases
+        alias_union = "(?:" + "|".join(COUNTRY_ALIASES.get(country, [re.escape(country)])) + ")"
+        m = re.search(rf"{alias_union}\s+{tok8}", page, flags=re.I)
         if not m:
             raise RuntimeError(f"Balance agrégée introuvable pour {country}.")
         return [_parse_tok(v) for v in m.groups()]
