@@ -29,16 +29,15 @@ EA_DIR = os.getenv("EA_PDF_DIR", st.secrets.get("EA_PDF_DIR", str(local_default)
 if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startswith("//")):
     EA_DIR = str(local_default)
 
-# Expose au runtime pour le parseur
+# Expose au runtime pour le parseur (aucun affichage global)
 os.environ["EA_PDF_DIR"] = EA_DIR
-st.caption(f"EA_PDF_DIR utilisé: {EA_DIR}")
 
 # ⚠️ Import APRÈS config du path
 from ea_balances import (  # noqa: E402
     load_ea_data as _load_ea_data,
     plot_ea,
     PARSER_VERSION,
-    _get_latest_pdf_file as pick_ea_pdf,  # ← pickeur utilisé dans l'onglet EA
+    _get_latest_pdf_file as pick_ea_pdf,  # sélection du PDF par date dans le nom (fallback mtime)
 )
 
 # ------------ Cache EA dépendant de la version du parseur ------------
@@ -149,12 +148,21 @@ with tab4:
     else:
         st.subheader("EA (Europe fuel oil – Fig.10)")
 
-        # --- Bandeau d’info *uniquement* dans cet onglet ---
+        # --- Debug EA uniquement ici ---
         with st.expander("EA – PDF utilisé (debug)", expanded=False):
+            st.caption(f"Dossier EA_PDF_DIR: {EA_DIR}")
+            # Alerte UNC (seulement dans l'expander)
+            if platform.system() != "Windows" and (EA_DIR.startswith('\\') or EA_DIR.startswith('//')):
+                st.warning(
+                    "Chemin UNC détecté sur un runtime Linux : ce n'est **pas accessible** directement.\n"
+                    "➡️ Copie le PDF dans le dossier local du repo "
+                    f"({(Path(__file__).resolve().parent / 'EA balances').as_posix()}) "
+                    "ou monte le partage réseau et fournis un chemin POSIX monté dans EA_PDF_DIR."
+                )
             try:
                 pdf_path = pick_ea_pdf()  # ← sélection par date dans le nom (fallback mtime)
                 st.info(f"PDF choisi par le parseur : **{pdf_path.name}**")
-                # Optionnel : comparaison avec le plus récent par mtime
+                # Comparaison mtime (facultatif)
                 try:
                     p = Path(EA_DIR)
                     latest_mtime = max(
@@ -165,16 +173,9 @@ with tab4:
                     st.caption(f"(par mtime) Plus récent : {latest_mtime.name} | mtime={ts}")
                 except Exception:
                     pass
-                # Petit listing utile
-                with st.expander("Lister quelques PDFs du dossier"):
-                    try:
-                        p = Path(EA_DIR)
-                        st.write([x.name for x in sorted(p.glob('*.pdf'))[:10]])
-                    except Exception as e:
-                        st.write(f"Listing impossible : {e}")
             except Exception as e:
                 st.warning(f"Impossible d’évaluer le PDF choisi : {e}")
-        # ----------------------------------------------------
+        # -------------------------------
 
         c1, c2, c3 = st.columns([1, 1, 3])
         with c1:
@@ -191,7 +192,6 @@ with tab4:
 
         with st.spinner("Chargement EA…"):
             try:
-                # 👇 le cache dépend de la version du parseur
                 ea_data = get_ea_data_cached(PARSER_VERSION)
             except FileNotFoundError as e:
                 st.error(f"EA_PDF_DIR: {EA_DIR}\n{e}")
