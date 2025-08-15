@@ -166,7 +166,7 @@ def generate_fuel_vs_gas_tab():
             start = df["Date"].max() - pd.DateOffset(months=3)
         elif preset == "YTD":
             start = pd.Timestamp(pd.Timestamp.today().year, 1, 1)
-        elif preset == "Depuis 2022":
+        elif preset == "Since 2022":
             start = pd.Timestamp("2022-01-01")
         else:
             start = df["Date"].min()
