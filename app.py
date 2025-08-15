@@ -13,7 +13,7 @@ from forward_curves import generate_forward_curves_tab
 from forward_curves_us import generate_us_forward_curves_tab
 from streamlit_platts_tab import generate_platts_analytics_tab
 from generate_stocks_tab import generate_stocks_tab
-from fuel_vs_gas import generate_fuel_vs_gas_tab  # 👈 NEW
+from fuel_vs_gas import generate_fuel_vs_gas_tab
 
 # ------------ Page config ------------
 st.set_page_config(page_title="Fuel Dashboard", layout="wide")
@@ -200,5 +200,4 @@ with tab7:
 
 # === TAB 8: GAS vs FUEL ===
 with tab8:
-    # Le module fuel_vs_gas gère l'absence d'Excel sans stopper l'app (il affiche un message).
     generate_fuel_vs_gas_tab()
