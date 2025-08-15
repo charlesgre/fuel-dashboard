@@ -47,7 +47,7 @@ def generate_fuel_vs_gas_tab():
 
     if not excel_path.exists():
         st.error(f"Fichier introuvable : {excel_path}")
-        st.stop()
+        return  # ne pas stopper toute l'app
 
     dfs = load_data(excel_path)
     df_jkm, df_ttf = dfs["df_jkm"], dfs["df_ttf"]

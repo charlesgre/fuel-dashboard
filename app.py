@@ -21,16 +21,11 @@ st.title("📊 Fuel Dashboard")
 
 # ------------ Config EA_PDF_DIR (AVANT d'importer ea_balances) ------------
 repo_root = Path(__file__).resolve().parent
-local_default = repo_root / "EA balances"   # dossier DU REPO (doit exister en prod)
+local_default = repo_root / "EA balances"
 
-# ordre: env -> secrets -> fallback local
 EA_DIR = os.getenv("EA_PDF_DIR", st.secrets.get("EA_PDF_DIR", str(local_default)))
-
-# ⛑️ Protection: si on n'est PAS sous Windows et que le chemin ressemble à un UNC, basculer sur le fallback local
 if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startswith("//")):
     EA_DIR = str(local_default)
-
-# Expose au runtime pour le parseur (aucun affichage global)
 os.environ["EA_PDF_DIR"] = EA_DIR
 
 # ⚠️ Import APRÈS config du path
@@ -38,16 +33,12 @@ from ea_balances import (  # noqa: E402
     load_ea_data as _load_ea_data,
     plot_ea,
     PARSER_VERSION,
-    _get_latest_pdf_file as pick_ea_pdf,  # sélection du PDF par date dans le nom (fallback mtime)
+    _get_latest_pdf_file as pick_ea_pdf,
 )
 
 # ------------ Cache EA dépendant de la version du parseur ------------
 @st.cache_data(show_spinner=False)
 def get_ea_data_cached(_parser_version: str):
-    """
-    Le paramètre _parser_version est uniquement là pour vider le cache.
-    Dès que PARSER_VERSION change dans ea_balances.py, le cache est invalidé.
-    """
     return _load_ea_data()
 
 # ------------ Tabs ------------
@@ -77,25 +68,11 @@ with tab2:
 # === TAB 3: CDD / TEMPERATURES ===
 with tab3:
     st.header("CDD / Temperatures")
-
-    # import paresseux + gestion d’erreurs propre
     try:
         from cdd_temperatures import get_all_cdd_figures
-    except ModuleNotFoundError as e:
-        st.error("Le module 'cdd_temperatures' est introuvable.")
-        with st.expander("Détails de l'erreur"):
-            st.exception(e)
-        st.stop()
-    except Exception as e:
-        st.error("Erreur pendant l'import de 'cdd_temperatures'.")
-        with st.expander("Traceback complet"):
-            st.exception(e)
-        st.stop()
-
-    try:
         figures = get_all_cdd_figures()
     except Exception as e:
-        st.error("Erreur à l'exécution de get_all_cdd_figures().")
+        st.error("Erreur CDD / Temperatures")
         with st.expander("Traceback complet"):
             st.exception(e)
         st.stop()
@@ -149,35 +126,18 @@ with tab4:
 
     else:
         st.subheader("EA (Europe fuel oil – Fig.10)")
-
-        # --- Debug EA uniquement ici ---
         with st.expander("EA – PDF utilisé (debug)", expanded=False):
             st.caption(f"Dossier EA_PDF_DIR: {EA_DIR}")
-            # Alerte UNC (seulement dans l'expander)
             if platform.system() != "Windows" and (EA_DIR.startswith('\\') or EA_DIR.startswith('//')):
                 st.warning(
-                    "Chemin UNC détecté sur un runtime Linux : ce n'est **pas accessible** directement.\n"
-                    "➡️ Copie le PDF dans le dossier local du repo "
-                    f"({(Path(__file__).resolve().parent / 'EA balances').as_posix()}) "
-                    "ou monte le partage réseau et fournis un chemin POSIX monté dans EA_PDF_DIR."
+                    "Chemin UNC détecté sur un runtime Linux : non accessible directement.\n"
+                    "➡️ Copie le PDF dans le repo 'EA balances' ou monte le partage réseau."
                 )
             try:
-                pdf_path = pick_ea_pdf()  # ← sélection par date dans le nom (fallback mtime)
+                pdf_path = pick_ea_pdf()
                 st.info(f"PDF choisi par le parseur : **{pdf_path.name}**")
-                # Comparaison mtime (facultatif)
-                try:
-                    p = Path(EA_DIR)
-                    latest_mtime = max(
-                        (x for x in p.glob("*.pdf") if x.is_file()),
-                        key=lambda x: x.stat().st_mtime
-                    )
-                    ts = datetime.fromtimestamp(latest_mtime.stat().st_mtime)
-                    st.caption(f"(par mtime) Plus récent : {latest_mtime.name} | mtime={ts}")
-                except Exception:
-                    pass
             except Exception as e:
                 st.warning(f"Impossible d’évaluer le PDF choisi : {e}")
-        # -------------------------------
 
         c1, c2, c3 = st.columns([1, 1, 3])
         with c1:
@@ -224,11 +184,21 @@ with tab6:
     st.header("Platts Window Analytics")
     generate_platts_analytics_tab()
 
-# === TAB 7: STOCKS ===
+# === TAB 7: STOCKS ===  ✅ protégée contre FileNotFoundError
 with tab7:
     st.header("📦 Fuel Stocks – Seasonal Charts & Comparisons")
-    generate_stocks_tab()
+    try:
+        generate_stocks_tab()
+    except FileNotFoundError as e:
+        st.error("Le fichier Excel des stocks est introuvable.")
+        with st.expander("Détails"):
+            st.exception(e)
+    except Exception as e:
+        st.error("Erreur dans l’onglet Stocks.")
+        with st.expander("Traceback complet"):
+            st.exception(e)
 
 # === TAB 8: GAS vs FUEL ===
 with tab8:
+    # Le module fuel_vs_gas gère l'absence d'Excel sans stopper l'app (il affiche un message).
     generate_fuel_vs_gas_tab()
