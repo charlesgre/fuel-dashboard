@@ -13,6 +13,7 @@ from forward_curves import generate_forward_curves_tab
 from forward_curves_us import generate_us_forward_curves_tab
 from streamlit_platts_tab import generate_platts_analytics_tab
 from generate_stocks_tab import generate_stocks_tab
+from fuel_vs_gas import generate_fuel_vs_gas_tab  # 👈 NEW
 
 # ------------ Page config ------------
 st.set_page_config(page_title="Fuel Dashboard", layout="wide")
@@ -50,9 +51,10 @@ def get_ea_data_cached(_parser_version: str):
     return _load_ea_data()
 
 # ------------ Tabs ------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📊 Prices", "⛽ Bunker Diff", "CDD/Temperatures",
-    "Balances (FGE / EA)", "📈 Forward Curves", "Platts Window", "📦 Fuel Stocks"
+    "Balances (FGE / EA)", "📈 Forward Curves", "Platts Window",
+    "📦 Fuel Stocks", "Gas vs Fuel"  # 👈 NEW
 ])
 
 # === TAB 1: PRICES ===
@@ -226,3 +228,7 @@ with tab6:
 with tab7:
     st.header("📦 Fuel Stocks – Seasonal Charts & Comparisons")
     generate_stocks_tab()
+
+# === TAB 8: GAS vs FUEL ===
+with tab8:
+    generate_fuel_vs_gas_tab()
