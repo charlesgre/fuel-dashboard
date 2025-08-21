@@ -67,12 +67,17 @@ def generate_platts_analytics_tab():
         merged['Year'] = merged['DATE'].dt.year
         merged = merged[merged['Year'] >= 2023].copy()
 
-        grade_choice = st.radio("Choisir le grade :", ['3.5%', '0.5%'], horizontal=True)
+    # Déduire automatiquement le grade (0.5% ou 3.5%) depuis le hub sélectionné
+    if "0.5" in selected_grade:
+        grade_choice = "0.5%"
+    else:
+        grade_choice = "3.5%"
 
-        mg = merged[merged['GRADE'] == grade_choice].copy()
-        if grade_choice == '0.5%':
-            z = (mg['DIFF'] - mg['DIFF'].mean()) / mg['DIFF'].std(ddof=0)
-            mg = mg[z.abs() < 3]
+    mg = merged[merged['GRADE'] == grade_choice].copy()
+    if grade_choice == '0.5%':
+        z = (mg['DIFF'] - mg['DIFF'].mean()) / mg['DIFF'].std(ddof=0)
+        mg = mg[z.abs() < 3]
+
 
         # PseudoDate = toutes les années alignées sur 2000 pour l’effet saisonnier
         mg['PseudoDate'] = mg['DATE'].apply(lambda d: pd.Timestamp(2000, d.month, d.day))
