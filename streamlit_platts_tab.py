@@ -46,13 +46,12 @@ def generate_platts_analytics_tab():
 
     st.subheader(f"📊 Analyse de {selected_grade} ({current_month})")
 
-    # === 0) Seasonal Diff (Window - Settlement) – toutes places pour chaque grade ===
+    # === Seasonal Diff interactif (Window - Settlement) ===
     with st.expander("📈 Seasonal Diff (Window - Settlement) — vue globale par grade", expanded=True):
         # Prix moyens "window" par date & hub
         window_prices = df.groupby(['ORDER_DATE', 'HUB'])['PRICE'].mean().reset_index()
 
         # Feuille "Settlement price"
-        st.caption("Lecture des prix de règlement…")
         settle = pd.read_excel(excel_path, sheet_name="Settlement price", skiprows=6)
         settle = settle.rename(columns={
             settle.columns[0]: 'DATE',
@@ -62,39 +61,38 @@ def generate_platts_analytics_tab():
         settle['DATE'] = pd.to_datetime(settle['DATE'])
 
         merged = pd.merge(window_prices, settle, left_on='ORDER_DATE', right_on='DATE', how='inner')
-        # Déduire le grade (0.5 / 3.5) depuis le texte du hub
         merged['GRADE'] = merged['HUB'].apply(lambda x: '3.5%' if '3.5' in str(x) else '0.5%')
         merged['SETTLEMENT'] = np.where(merged['GRADE'].eq('3.5%'), merged['3.5%'], merged['0.5%'])
         merged['DIFF'] = merged['PRICE'] - merged['SETTLEMENT']
         merged['Year'] = merged['DATE'].dt.year
         merged = merged[merged['Year'] >= 2023].copy()
 
-        grade_choice = st.radio("Choisir la courbe de grade :", ['3.5%', '0.5%'], horizontal=True)
+        grade_choice = st.radio("Choisir le grade :", ['3.5%', '0.5%'], horizontal=True)
 
-        # PseudoDate => aligner sur une même année pour l’effet saisonnier
         mg = merged[merged['GRADE'] == grade_choice].copy()
-        # petit nettoyage outliers pour 0.5% comme dans ton report
         if grade_choice == '0.5%':
             z = (mg['DIFF'] - mg['DIFF'].mean()) / mg['DIFF'].std(ddof=0)
             mg = mg[z.abs() < 3]
 
+        # PseudoDate = toutes les années alignées sur 2000 pour l’effet saisonnier
         mg['PseudoDate'] = mg['DATE'].apply(lambda d: pd.Timestamp(2000, d.month, d.day))
-        mg.sort_values('PseudoDate', inplace=True)
 
-        # Plot Matplotlib (on garde le style report)
-        fig, ax = plt.subplots(figsize=(16, 6))
-        colors = {2023: 'tab:blue', 2024: 'tab:green', 2025: 'black'}
-        for year, group in mg.groupby('Year'):
-            ax.plot(group['PseudoDate'], group['DIFF'], label=str(year),
-                    linewidth=1.8, color=colors.get(year, None))
-        ax.set_xticks(pd.date_range("2000-01-01", "2000-12-31", freq="MS"))
-        ax.set_xticklabels(['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'])
-        ax.set_title(f"Seasonal Diff (Window - Settlement) – {grade_choice}")
-        ax.set_ylabel("Diff (USD/tonne)")
-        ax.set_xlabel("Month")
-        ax.grid(True)
-        ax.legend(title="Year")
-        st.pyplot(fig, clear_figure=True)
+        fig_sd = px.line(
+            mg.sort_values('PseudoDate'),
+            x='PseudoDate', y='DIFF', color='Year',
+            labels={'PseudoDate': 'Month', 'DIFF': 'Diff (USD/tonne)'},
+            title=f"Seasonal Diff (Window - Settlement) – {grade_choice}",
+            markers=True
+        )
+        # Ticks mensuels + slider/zoom interactif
+        fig_sd.update_xaxes(
+            tickvals=pd.date_range("2000-01-01", "2000-12-31", freq="MS"),
+            tickformat="%b",
+            rangeslider_visible=True
+        )
+        fig_sd.update_traces(hovertemplate="%{x|%b %d} • %{fullData.name}<br>Diff: %{y:.2f}")
+        st.plotly_chart(fig_sd, use_container_width=True)
+
 
     # === 1) Heatmap interactive (mois courant) ===
     st.markdown("#### 🔥 Heatmap – Volumes journaliers (mois courant)")
@@ -116,19 +114,38 @@ def generate_platts_analytics_tab():
     )
     st.plotly_chart(fig1, use_container_width=True)
 
-    # === 2) Yearly Heatmap (année en cours) ===
+    # === Yearly Heatmap interactif (année en cours) ===
     st.markdown("#### 🗓️ Yearly Heatmap – Volumes journaliers (année en cours)")
     year_now = datetime.now().year
     months_order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
     yearly_df = df_grade[df_grade['YEAR'] == year_now].copy()
     yearly_df['MONTH'] = pd.Categorical(yearly_df['MONTH'], categories=months_order, ordered=True)
+
     yearly_calendar = (
         yearly_df.groupby(['MONTH', 'DAY'], observed=True)['DEAL_QUANTITY']
-        .sum()
-        .unstack()
-        .reindex(index=months_order)
-        .fillna(0)
+        .sum().unstack().reindex(index=months_order).fillna(0)
     )
+
+    fig_y = px.imshow(
+        yearly_calendar,
+        labels=dict(x="Day", y="Month", color="Volume"),
+        x=yearly_calendar.columns, y=yearly_calendar.index,
+        text_auto=".1f",
+        aspect="auto",
+        color_continuous_scale="RdBu",
+        color_continuous_midpoint=0
+    )
+    fig_y.update_layout(
+        title=f"Daily Quantity Heatmap – Full Year – {selected_grade} – {year_now}",
+        margin=dict(t=40, b=10, l=10, r=10),
+        coloraxis_colorbar=dict(title="Volume")
+    )
+    # Hover lisible
+    fig_y.update_traces(hovertemplate="Month: %{y}<br>Day: %{x}<br>Volume: %{z:.1f}")
+
+    st.plotly_chart(fig_y, use_container_width=True)
+
 
     # seaborn pour colormap type report
     fig_y, ax_y = plt.subplots(figsize=(18, 6))
