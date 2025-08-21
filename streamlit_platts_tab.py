@@ -60,48 +60,93 @@ def generate_platts_analytics_tab():
     )
     st.plotly_chart(fig1, use_container_width=True)
 
-    # 2) Réseau Acheteurs–Vendeurs interactif
+    # 2) Réseau Acheteurs–Vendeurs interactif (liens colorés par volumes)
     st.markdown("#### 🔗 Réseau Acheteurs – Vendeurs")
+
     interaction = (
         current_df
         .groupby(['BUYER', 'SELLER'])['DEAL_QUANTITY']
         .sum()
         .reset_index()
+        .rename(columns={'DEAL_QUANTITY': 'QTY'})
     )
-    G = nx.from_pandas_edgelist(interaction, 'BUYER', 'SELLER', edge_attr='DEAL_QUANTITY')
+
+    # Graphe + positions
+    G = nx.from_pandas_edgelist(interaction, 'BUYER', 'SELLER', edge_attr='QTY')
     pos = nx.spring_layout(G, k=0.5, seed=42)
 
-    edge_x, edge_y, edge_width = [], [], []
+    # bornes pour l'échelle
+    qmin = interaction['QTY'].min()
+    qmax = interaction['QTY'].max()
+    rng = (qmax - qmin) if qmax != qmin else 1.0
+
+    # Couleurs: on utilise une color scale Plotly (Viridis) en fonction de la quantité
+    def qty_to_color(q):
+        t = (q - qmin) / rng
+        return px.colors.sample_colorscale('Viridis', t)[0]
+
+    edge_traces = []
     for u, v, d in G.edges(data=True):
         x0, y0 = pos[u]; x1, y1 = pos[v]
-        edge_x += [x0, x1, None]
-        edge_y += [y0, y1, None]
-        edge_width.append(d['DEAL_QUANTITY'] / interaction['DEAL_QUANTITY'].max() * 10)
+        q = d['QTY']
+        edge_traces.append(
+            go.Scatter(
+                x=[x0, x1], y=[y0, y1],
+                mode='lines',
+                line=dict(
+                    width=1 + 8*((q - qmin)/rng),   # épaisseur selon la quantité
+                    color=qty_to_color(q)           # couleur selon la quantité
+                ),
+                hoverinfo='text',
+                text=f"{u} → {v}<br>Quantité: {q:,.0f}",
+                showlegend=False
+            )
+        )
 
+    # Nœuds
     node_x = [pos[n][0] for n in G.nodes()]
     node_y = [pos[n][1] for n in G.nodes()]
     node_text = list(G.nodes())
 
-    edge_trace = go.Scatter(
-        x=edge_x, y=edge_y,
-        line=dict(width=1, color='#888'),
-        hoverinfo='none',
-        mode='lines'
-    )
     node_trace = go.Scatter(
         x=node_x, y=node_y,
         mode='markers+text',
         text=node_text,
         textposition="top center",
         hoverinfo='text',
-        marker=dict(size=20, color='lightblue')
+        marker=dict(size=20, color='lightblue'),
+        showlegend=False
     )
 
-    fig2 = go.Figure(data=[edge_trace, node_trace])
-    fig2.update_layout(showlegend=False, xaxis=dict(showgrid=False, zeroline=False),
-                       yaxis=dict(showgrid=False, zeroline=False),
-                       margin=dict(t=20, b=20, l=20, r=20))
+    # Trace "fantôme" pour afficher une colorbar continue (échelle des quantités)
+    colorbar_trace = go.Scatter(
+        x=[None], y=[None],
+        mode='markers',
+        marker=dict(
+            colorscale='Viridis',
+            showscale=True,
+            cmin=qmin, cmax=qmax,
+            color=[qmin],            # valeur fictive
+            size=0.0001,
+            colorbar=dict(
+                title='Quantité',
+                thickness=15,
+                len=0.8
+            ),
+        ),
+        hoverinfo='none',
+        showlegend=False
+    )
+
+    fig2 = go.Figure(data=edge_traces + [node_trace, colorbar_trace])
+    fig2.update_layout(
+        showlegend=False,
+        xaxis=dict(showgrid=False, zeroline=False, visible=False),
+        yaxis=dict(showgrid=False, zeroline=False, visible=False),
+        margin=dict(t=20, b=20, l=20, r=20)
+    )
     st.plotly_chart(fig2, use_container_width=True)
+
 
     # 3) Volumes quotidiens interactif
     st.markdown("#### 📅 Volumes quotidiens")
