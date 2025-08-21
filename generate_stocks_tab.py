@@ -20,13 +20,12 @@ HIST_START, HIST_END = 2015, 2024
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).strip().lower())
 
-DESC_ALIASES  = {"description","desc","series","name","instrument","instrumentname","title"}
-DATE_ALIASES  = {"assessdate","date","assessmentdate","tradedate","pricedate","asofdate"}
-VALUE_ALIASES = {"value","val","close","price","obs","volume","stock","stocks","kt"}
-UOM_ALIASES   = {"uom","unit","units","measure"}
+DESC_ALIASES  = {"description","desc","series","name","instrument","instrumentname","title","libelle"}
+DATE_ALIASES  = {"assessdate","date","assessmentdate","tradedate","pricedate","asofdate","datetime"}
+VALUE_ALIASES = {"value","val","close","price","obs","volume","stock","stocks","kt","valeur"}
+UOM_ALIASES   = {"uom","unit","units","measure","unite"}
 
 def _map_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # map des noms normalisés -> colonnes réelles
     norm_map = {_norm(c): c for c in df.columns}
 
     def pick(aliases):
@@ -43,8 +42,7 @@ def _map_columns(df: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(
             f"Colonnes non reconnues: {missing}\n"
-            f"Colonnes vues: {list(df.columns)}\n"
-            "Astuce: renomme en Description / AssessDate / Value (ou donne-moi les libellés exacts)."
+            f"Colonnes vues: {list(df.columns)}"
         )
 
     out = df[[c_desc, c_date, c_value] + ([c_uom] if c_uom else [])].rename(columns={
@@ -55,23 +53,18 @@ def _map_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _try_read_with_header_row(path: str, sheet: str, header_row: int) -> pd.DataFrame:
     tmp = pd.read_excel(path, sheet_name=sheet, header=header_row)
-    # si colonnes dupliquées, les rendre uniques
     tmp.columns = pd.io.parsers.ParserBase({'names':tmp.columns})._maybe_dedup_names(tmp.columns)
     return _map_columns(tmp)
 
 @st.cache_data(show_spinner=False)
 def _read_excel(path: str) -> tuple[pd.DataFrame, str, int]:
     xls = pd.ExcelFile(path)
-
-    # ordre: candidats, puis autres
     sheets = [s for s in SHEET_CANDIDATES if s in xls.sheet_names] + [s for s in xls.sheet_names if s not in SHEET_CANDIDATES]
 
-    # Essaye chaque feuille, et pour chacune, détecte la ligne d’entête dans les 15 premières lignes
     for sheet in sheets:
-        # lecture brute sans header pour détecter la ligne où se trouvent les en-têtes
-        raw = pd.read_excel(path, sheet_name=sheet, header=None, nrows=15)
-        # cherche une ligne contenant au moins deux alias distincts
-        for hdr in range(min(15, len(raw))):
+        raw = pd.read_excel(path, sheet_name=sheet, header=None, nrows=50)
+
+        for hdr in range(min(50, len(raw))):
             candidate = raw.iloc[hdr].astype(str).tolist()
             normed = {_norm(c) for c in candidate}
             hit_count = (
@@ -79,20 +72,24 @@ def _read_excel(path: str) -> tuple[pd.DataFrame, str, int]:
                 (len(normed & DATE_ALIASES) > 0) +
                 (len(normed & VALUE_ALIASES) > 0)
             )
-            if hit_count >= 3:
+            if hit_count >= 2:  # plus tolérant (2 suffisent)
                 try:
                     df = _try_read_with_header_row(path, sheet, hdr)
                     return df, sheet, hdr
                 except Exception:
                     continue
-        # fallback: header=0 si rien trouvé mais on tente quand même
+
+        # fallback header=0
         try:
             df = _try_read_with_header_row(path, sheet, 0)
             return df, sheet, 0
         except Exception:
             pass
 
-    raise ValueError("Impossible de trouver une feuille avec les colonnes Description / Date / Value.")
+    raise ValueError(
+        "Impossible de trouver une feuille avec les colonnes Description / Date / Value.\n"
+        f"Feuilles disponibles: {xls.sheet_names}"
+    )
 
 def load_data() -> pd.DataFrame:
     excel_path = os.path.join("Platts window", "Window platts global data.xlsx")
@@ -101,13 +98,11 @@ def load_data() -> pd.DataFrame:
         st.stop()
     df, sheet, hdr = _read_excel(excel_path)
 
-    # post-traitements
     df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce")
     df = df.dropna(subset=["ASSESSDATE"])
     df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
     df = df.dropna(subset=["VALUE"])
 
-    # mapping des titres (tolérant)
     def map_title(desc: str) -> str | None:
         if desc in TITLE_MAP:
             return TITLE_MAP[desc]
