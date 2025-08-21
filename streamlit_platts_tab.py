@@ -78,25 +78,24 @@ def generate_platts_analytics_tab():
         z = (mg['DIFF'] - mg['DIFF'].mean()) / mg['DIFF'].std(ddof=0)
         mg = mg[z.abs() < 3]
 
+    # PseudoDate = toutes les années alignées sur 2000 pour l’effet saisonnier
+    mg['PseudoDate'] = mg['DATE'].apply(lambda d: pd.Timestamp(2000, d.month, d.day))
 
-        # PseudoDate = toutes les années alignées sur 2000 pour l’effet saisonnier
-        mg['PseudoDate'] = mg['DATE'].apply(lambda d: pd.Timestamp(2000, d.month, d.day))
+    fig_sd = px.line(
+        mg.sort_values('PseudoDate'),
+        x='PseudoDate', y='DIFF', color='Year',
+        labels={'PseudoDate': 'Month', 'DIFF': 'Diff (USD/tonne)'},
+        title=f"Seasonal Diff (Window - Settlement) – {grade_choice}",
+        markers=True
+    )
+    fig_sd.update_xaxes(
+        tickvals=pd.date_range("2000-01-01", "2000-12-31", freq="MS"),
+        tickformat="%b",
+        rangeslider_visible=True
+    )
+    fig_sd.update_traces(hovertemplate="%{x|%b %d} • %{fullData.name}<br>Diff: %{y:.2f}")
+    st.plotly_chart(fig_sd, use_container_width=True)
 
-        fig_sd = px.line(
-            mg.sort_values('PseudoDate'),
-            x='PseudoDate', y='DIFF', color='Year',
-            labels={'PseudoDate': 'Month', 'DIFF': 'Diff (USD/tonne)'},
-            title=f"Seasonal Diff (Window - Settlement) – {grade_choice}",
-            markers=True
-        )
-        # Ticks mensuels + slider/zoom interactif
-        fig_sd.update_xaxes(
-            tickvals=pd.date_range("2000-01-01", "2000-12-31", freq="MS"),
-            tickformat="%b",
-            rangeslider_visible=True
-        )
-        fig_sd.update_traces(hovertemplate="%{x|%b %d} • %{fullData.name}<br>Diff: %{y:.2f}")
-        st.plotly_chart(fig_sd, use_container_width=True)
 
 
     # === 1) Heatmap interactive (mois courant) ===
@@ -150,16 +149,6 @@ def generate_platts_analytics_tab():
     fig_y.update_traces(hovertemplate="Month: %{y}<br>Day: %{x}<br>Volume: %{z:.1f}")
 
     st.plotly_chart(fig_y, use_container_width=True)
-
-
-    # seaborn pour colormap type report
-    fig_y, ax_y = plt.subplots(figsize=(18, 6))
-    sns.heatmap(yearly_calendar, cmap='RdBu_r', center=0, linewidths=0.5,
-                annot=True, fmt=".1f", ax=ax_y)
-    ax_y.set_title(f"Daily Quantity Heatmap – Full Year – {selected_grade} – {year_now}")
-    ax_y.set_xlabel("DAY")
-    ax_y.set_ylabel("MONTH")
-    st.pyplot(fig_y, clear_figure=True)
 
     # === 3) Réseau Acheteurs–Vendeurs interactif (liens colorés) ===
     st.markdown("#### 🔗 Réseau Acheteurs – Vendeurs")
