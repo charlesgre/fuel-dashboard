@@ -12,7 +12,7 @@ from fge_balances import plot_fge_balances, load_fge_balances
 from forward_curves import generate_forward_curves_tab
 from forward_curves_us import generate_us_forward_curves_tab
 from streamlit_platts_tab import generate_platts_analytics_tab
-from generate_stocks_tab import generate_stocks_tab
+from generate_stocks_tab import render_tab as generate_stocks_tab
 from fuel_vs_gas import generate_fuel_vs_gas_tab
 
 # ------------ Page config ------------
