@@ -121,11 +121,46 @@ def _read_excel_all(path: str) -> tuple[pd.DataFrame, str]:
     raise ValueError(f"No usable sheet found in {os.path.basename(path)}. Sheets: {xls.sheet_names}")
 
 def load_data() -> pd.DataFrame:
-    path = EXCEL_REL_PATH
+    path = os.path.join("Stocks", "Data global stocks.xlsx")  # <- your path
     if not os.path.exists(path):
         st.error(f"Excel not found: {path}")
         st.stop()
+
     df, chosen = _read_excel_all(path)
+
+    # --- HARDEN types ---
+    df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce")
+    df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
+    df = df.dropna(subset=["ASSESSDATE", "VALUE"])
+
+    df["DESCRIPTION"] = df["DESCRIPTION"].astype(str).fillna("")
+
+
+    # --- Robust title mapping ---
+    def map_title(desc) -> str | None:
+        # exact map first
+        if desc in TITLE_MAP:
+            return TITLE_MAP[desc]
+
+        s = str(desc).lower() if not isinstance(desc, str) else desc.lower()
+
+        if ("resid" in s or "residual" in s) and "ara" in s:
+            return "ARA stocks"
+        if "padd" in s and "3" in s:
+            return "PADD 3 stocks"
+        if "fujairah" in s or "fedcom" in s:
+            return "Fujairah stocks"
+        if "singapore" in s:
+            return "Singapore stocks"
+        return None
+
+    df["TITLE"] = df["DESCRIPTION"].map(map_title)
+    df = df[df["TITLE"].notna()].copy()
+
+    # derive year/week
+    df["Year"] = df["ASSESSDATE"].dt.year
+    df["Week"] = df["ASSESSDATE"].dt.isocalendar().week.astype(int)
+
     st.caption(f"Using sheet: **{chosen}** from `{os.path.basename(path)}`")
     return df
 
