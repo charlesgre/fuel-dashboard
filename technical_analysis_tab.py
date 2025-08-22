@@ -113,25 +113,48 @@ def _plot_interactive(df_ind, title):
         row_heights=[0.48, 0.17, 0.17, 0.18],
         subplot_titles=(f"{title} – Price & Bollinger", "RSI", "CCI", "Z-Score")
     )
+
+    # Courbes prix + bandes
     fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind["price"], name="Price"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind["sma"], name="SMA"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind["upper"], name="Upper Band", line=dict(dash="dash")), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind["lower"], name="Lower Band", line=dict(dash="dash")), row=1, col=1)
-    fig.add_trace(go.Scatter(
-        x=pd.concat([df_ind.index, df_ind.index[::-1]]),
-        y=pd.concat([df_ind["upper"], df_ind["lower"][::-1]]),
-        fill="toself", name="Band", opacity=0.15, line=dict(width=0)
-    ), row=1, col=1)
+
+    # Remplissage de la zone entre bandes (corrigé)
+    band = df_ind[["upper", "lower"]].dropna()
+    if not band.empty:
+        xi = band.index.astype("datetime64[ns]").to_numpy()
+        x_fill = np.concatenate([xi, xi[::-1]])
+        y_fill = np.concatenate([band["upper"].to_numpy(), band["lower"].to_numpy()[::-1]])
+        fig.add_trace(
+            go.Scatter(
+                x=x_fill,
+                y=y_fill,
+                fill="toself",
+                name="Band",
+                opacity=0.15,
+                line=dict(width=0),
+                showlegend=True,
+            ),
+            row=1, col=1
+        )
+
+    # RSI
     fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind["rsi"], name="RSI"), row=2, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
     fig.update_yaxes(range=[0, 100], row=2, col=1)
+
+    # CCI
     fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind["cci"], name="CCI"), row=3, col=1)
     fig.add_hline(y=100, line_dash="dash", line_color="red", row=3, col=1)
     fig.add_hline(y=-100, line_dash="dash", line_color="green", row=3, col=1)
+
+    # Z-score
     fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind["z"], name="Z-Score"), row=4, col=1)
     fig.add_hline(y=1, line_dash="dash", line_color="red", row=4, col=1)
     fig.add_hline(y=-1, line_dash="dash", line_color="green", row=4, col=1)
+
     fig.update_layout(height=900, margin=dict(l=40, r=20, t=60, b=40))
     return fig
 
