@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from pathlib import Path
 
 DEFAULT_FILE = "Prices/Prices sheet.xlsx"  # adapte si besoin
 
@@ -84,105 +85,62 @@ def _analyze_signals(row):
 def _signal_color(text):
     return {"Buy": "green", "Sell": "red", "Neutral": "gray"}.get(text, "gray")
 
-def _load_prices(uploaded_file):
-    # 1) Résolution du chemin par défaut (robuste)
-    if uploaded_file is None:
-        from pathlib import Path
-        base = Path(__file__).resolve().parent
-        xlsx_path = base / "Prices" / "Prices sheet.xlsx"
-        if not xlsx_path.exists():
-            st.error(f"Fichier introuvable: {xlsx_path}")
-            return pd.DataFrame()
-        excel_file = pd.ExcelFile(xlsx_path, engine="openpyxl")
-    else:
-        excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
+def _get_excel_file(uploaded_file):
+    """Retourne un pd.ExcelFile + chemin affichable."""
+    if uploaded_file is not None:
+        return pd.ExcelFile(uploaded_file, engine="openpyxl"), "upload"
+    base = Path(__file__).resolve().parent
+    xlsx_path = base / "Prices" / "Prices sheet.xlsx"
+    if not xlsx_path.exists():
+        st.error(f"Fichier introuvable: {xlsx_path}")
+        return None, None
+    return pd.ExcelFile(xlsx_path, engine="openpyxl"), str(xlsx_path)
 
-    # 2) Recherche automatique de la bonne feuille + ligne d'entêtes
-    best_df = None
-    best_score = -1
-    best_info = None
+@st.cache_data(show_spinner=False)
+def _auto_load_prices(xls: pd.ExcelFile):
+    """Ancienne logique auto (scan des feuilles + auto header)."""
+    SEC = set(s.lower() for s in SECURITIES)
+    best_df, best_score = None, -1
 
-    for sheet in excel_file.sheet_names:
-        # on lit d'abord sans entêtes pour scanner les premières ~30 lignes
-        tmp = pd.read_excel(excel_file, sheet_name=sheet, header=None, nrows=50)
-        tmp = tmp.fillna("")
-
-        header_row = None
-        score_row = -1
-
+    for sheet in xls.sheet_names:
+        tmp = pd.read_excel(xls, sheet_name=sheet, header=None, nrows=50).fillna("")
+        header_row, score_row = None, -1
         for i in range(min(30, len(tmp))):
             row_vals = [str(x).strip() for x in list(tmp.iloc[i, :].values)]
             row_lower = [v.lower() for v in row_vals]
-
-            # heuristique 1 : présence d'une colonne Date
             has_date = any(v in ("date", "dates") for v in row_lower)
-
-            # heuristique 2 : nb de correspondances avec nos SECURITIES
-            matches = 0
-            for sec in SECURITIES:
-                if any(sec.lower() == v for v in row_lower):
-                    matches += 1
-
-            score = (2 if has_date else 0) + matches  # pondère la présence de "Date"
+            matches = sum(1 for v in row_lower if v in SEC)
+            score = (2 if has_date else 0) + matches
             if score > score_row:
-                score_row = score
-                header_row = i
-
-        # si on n'a rien trouvé de convaincant, on tente quand même la ligne 0
+                score_row, header_row = score, i
         if header_row is None:
-            header_row = 0
+            continue
 
-        # recharge cette feuille avec l'entête détectée
-        df = pd.read_excel(excel_file, sheet_name=sheet, header=header_row)
-        # drop colonnes entièrement vides
-        df = df.dropna(axis=1, how="all")
-
-        # détecte la colonne date
-        date_col = None
-        for c in df.columns:
-            if str(c).strip().lower() in ("date", "dates"):
-                date_col = c
-                break
-
-        # si pas de colonne 'Date', on tente la première colonne
-        if date_col is None and len(df.columns) > 0:
-            try:
+        df = pd.read_excel(xls, sheet_name=sheet, header=header_row).dropna(axis=1, how="all")
+        # date col
+        date_col = next((c for c in df.columns if str(c).strip().lower() in ("date", "dates")), None)
+        try:
+            if date_col is None:
                 df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
                 df = df.set_index(df.columns[0])
-            except Exception:
-                # pas exploitable → on saute
-                continue
-        else:
-            # colonne date explicite
-            try:
+            else:
                 df[date_col] = pd.to_datetime(df[date_col])
                 df = df.set_index(date_col)
-            except Exception:
-                continue
+        except Exception:
+            continue
 
-        # score “utilité” = nb de colonnes qui appartiennent à notre univers
         present = [c for c in SECURITIES if c in df.columns]
         score_useful = len(present) + score_row
-
         if score_useful > best_score:
-            best_score = score_useful
-            best_df = df.copy()
-            best_info = (sheet, header_row, present)
+            best_df, best_score = df.copy(), score_useful
 
-    if best_df is None or best_df.empty:
+    if best_df is None:
         return pd.DataFrame()
-
-    # tri par date, cast numérique
-    best_df = best_df.sort_index()
+    # cast num
     for c in best_df.columns:
         best_df[c] = pd.to_numeric(best_df[c], errors="coerce")
+    return best_df.sort_index()
 
-    # petit message debug utile
-    if best_info:
-        sheet, header_row, present = best_info
-        st.caption(f"Feuille détectée: **{sheet}** | Ligne d'entêtes: **{header_row+1}** | Séries trouvées: {len(present)}")
-
-    return best_df
 
 
 def _plot_interactive(df_ind, title):
@@ -228,7 +186,44 @@ def render():
     st.title("Technical Analysis (Interactif)")
     uploaded = st.file_uploader("Charger un fichier Excel (sinon j’utilise `Prices/Prices sheet.xlsx`)", type=["xlsx"])
 
-    df_raw = _load_prices(uploaded)
+    xls, path = _get_excel_file(uploaded)
+    if xls is None:
+        return
+
+    st.caption(f"Fichier chargé : **{path}** | Feuilles: {', '.join(xls.sheet_names)}")
+    manual = st.toggle("Détection manuelle (utilise si tu vois Column1/Column2)", value=False)
+
+    if not manual:
+        df_raw = _auto_load_prices(xls)
+        if df_raw.empty:
+            st.warning("Auto-détection KO. Active la détection manuelle ci-dessus.")
+            return
+    else:
+        # ---- Mode manuel : feuille + header + colonne date ----
+        sheet = st.selectbox("Feuille Excel", options=xls.sheet_names)
+        preview = pd.read_excel(xls, sheet_name=sheet, header=None, nrows=50)
+        st.write("Aperçu des 50 premières lignes (sans entêtes) :")
+        st.dataframe(preview)
+
+        header_row_1based = st.number_input("Ligne d’en-têtes (1 = première ligne)", min_value=1, max_value=len(preview), value=1, step=1)
+        header_row = int(header_row_1based) - 1
+
+        df_tmp = pd.read_excel(xls, sheet_name=sheet, header=header_row).dropna(axis=1, how="all")
+        date_col = st.selectbox("Colonne de date", options=list(df_tmp.columns))
+
+        # parse date/index
+        try:
+            df_tmp[date_col] = pd.to_datetime(df_tmp[date_col])
+            df_tmp = df_tmp.set_index(date_col)
+        except Exception as e:
+            st.error(f"Impossible de parser les dates dans la colonne '{date_col}': {e}")
+            return
+
+        # cast num
+        for c in df_tmp.columns:
+            df_tmp[c] = pd.to_numeric(df_tmp[c], errors="coerce")
+        df_raw = df_tmp.sort_index()
+
     if df_raw.empty:
         st.warning("Le fichier de prix est vide ou non reconnu.")
         return
