@@ -85,27 +85,105 @@ def _signal_color(text):
     return {"Buy": "green", "Sell": "red", "Neutral": "gray"}.get(text, "gray")
 
 def _load_prices(uploaded_file):
-    if uploaded_file is not None:
-        df = pd.read_excel(uploaded_file)
+    # 1) Résolution du chemin par défaut (robuste)
+    if uploaded_file is None:
+        from pathlib import Path
+        base = Path(__file__).resolve().parent
+        xlsx_path = base / "Prices" / "Prices sheet.xlsx"
+        if not xlsx_path.exists():
+            st.error(f"Fichier introuvable: {xlsx_path}")
+            return pd.DataFrame()
+        excel_file = pd.ExcelFile(xlsx_path, engine="openpyxl")
     else:
-        df = pd.read_excel(DEFAULT_FILE)
-    # détecte colonne date
-    date_col = None
-    for c in df.columns:
-        if str(c).lower() in ["date", "dates"]:
-            date_col = c
-            break
-    if date_col is not None:
-        df[date_col] = pd.to_datetime(df[date_col])
-        df = df.set_index(date_col)
-    else:
-        # si la première colonne est une date implicite
-        try:
-            df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
-            df = df.set_index(df.columns[0])
-        except Exception:
-            pass
-    return df.sort_index()
+        excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
+
+    # 2) Recherche automatique de la bonne feuille + ligne d'entêtes
+    best_df = None
+    best_score = -1
+    best_info = None
+
+    for sheet in excel_file.sheet_names:
+        # on lit d'abord sans entêtes pour scanner les premières ~30 lignes
+        tmp = pd.read_excel(excel_file, sheet_name=sheet, header=None, nrows=50)
+        tmp = tmp.fillna("")
+
+        header_row = None
+        score_row = -1
+
+        for i in range(min(30, len(tmp))):
+            row_vals = [str(x).strip() for x in list(tmp.iloc[i, :].values)]
+            row_lower = [v.lower() for v in row_vals]
+
+            # heuristique 1 : présence d'une colonne Date
+            has_date = any(v in ("date", "dates") for v in row_lower)
+
+            # heuristique 2 : nb de correspondances avec nos SECURITIES
+            matches = 0
+            for sec in SECURITIES:
+                if any(sec.lower() == v for v in row_lower):
+                    matches += 1
+
+            score = (2 if has_date else 0) + matches  # pondère la présence de "Date"
+            if score > score_row:
+                score_row = score
+                header_row = i
+
+        # si on n'a rien trouvé de convaincant, on tente quand même la ligne 0
+        if header_row is None:
+            header_row = 0
+
+        # recharge cette feuille avec l'entête détectée
+        df = pd.read_excel(excel_file, sheet_name=sheet, header=header_row)
+        # drop colonnes entièrement vides
+        df = df.dropna(axis=1, how="all")
+
+        # détecte la colonne date
+        date_col = None
+        for c in df.columns:
+            if str(c).strip().lower() in ("date", "dates"):
+                date_col = c
+                break
+
+        # si pas de colonne 'Date', on tente la première colonne
+        if date_col is None and len(df.columns) > 0:
+            try:
+                df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
+                df = df.set_index(df.columns[0])
+            except Exception:
+                # pas exploitable → on saute
+                continue
+        else:
+            # colonne date explicite
+            try:
+                df[date_col] = pd.to_datetime(df[date_col])
+                df = df.set_index(date_col)
+            except Exception:
+                continue
+
+        # score “utilité” = nb de colonnes qui appartiennent à notre univers
+        present = [c for c in SECURITIES if c in df.columns]
+        score_useful = len(present) + score_row
+
+        if score_useful > best_score:
+            best_score = score_useful
+            best_df = df.copy()
+            best_info = (sheet, header_row, present)
+
+    if best_df is None or best_df.empty:
+        return pd.DataFrame()
+
+    # tri par date, cast numérique
+    best_df = best_df.sort_index()
+    for c in best_df.columns:
+        best_df[c] = pd.to_numeric(best_df[c], errors="coerce")
+
+    # petit message debug utile
+    if best_info:
+        sheet, header_row, present = best_info
+        st.caption(f"Feuille détectée: **{sheet}** | Ligne d'entêtes: **{header_row+1}** | Séries trouvées: {len(present)}")
+
+    return best_df
+
 
 def _plot_interactive(df_ind, title):
     fig = make_subplots(
