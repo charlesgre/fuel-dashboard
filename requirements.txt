@@ -7,3 +7,4 @@ matplotlib
 networkx
 xlrd
 pdfplumber
+numpy
