@@ -71,7 +71,7 @@ def _map_required_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- data loading (simple & robust) ----------
 @st.cache_data(show_spinner=False)
-def _read_excel_all(path: str) -> tuple[pd.DataFrame, str]:
+def _read_excel_all(path: str, _mtime: float) -> tuple[pd.DataFrame, str]:
     xls = pd.ExcelFile(path)
     sheet_order = [s for s in SHEET_CANDIDATES if s in xls.sheet_names] + \
                   [s for s in xls.sheet_names if s not in SHEET_CANDIDATES]
@@ -87,7 +87,7 @@ def _read_excel_all(path: str) -> tuple[pd.DataFrame, str]:
             df = _map_required_columns(raw)
 
             # clean types
-            df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce")
+            df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce", dayfirst=True)
             df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
             df = df.dropna(subset=["ASSESSDATE", "VALUE"])
 
@@ -127,10 +127,10 @@ def load_data() -> pd.DataFrame:
         st.error(f"Excel not found: {path}")
         st.stop()
 
-    df, chosen = _read_excel_all(path)
+    df, chosen = _read_excel_all(path, os.path.getmtime(path))
 
     # --- HARDEN types ---
-    df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce")
+    df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce", dayfirst=True)
     df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
     df = df.dropna(subset=["ASSESSDATE", "VALUE"])
 
@@ -181,8 +181,12 @@ def _nearest_on_or_before(series: pd.Series, target_date: pd.Timestamp):
     idx = s.index.max(); return idx, s.loc[idx]
 
 def compute_change_table(df_region: pd.DataFrame):
-    ts = df_region.sort_values("ASSESSDATE").set_index("ASSESSDATE")["VALUE"].asfreq("D", method="pad")
-    latest_date = ts.dropna().index.max(); latest_val = float(ts.loc[latest_date])
+    ts = (df_region.sort_values("ASSESSDATE")
+                    .set_index("ASSESSDATE")["VALUE"]
+                    .dropna()
+                    .asfreq("D", method="pad"))
+    latest_date = ts.index.max(); latest_val = float(ts.loc[latest_date])
+
 
     rows = [["Latest", latest_date.strftime("%d-%m-%Y"), f"{latest_val:,.2f}", "-", "-"]]
     for label, delta in [("Previous week", pd.DateOffset(weeks=1)),
@@ -218,9 +222,9 @@ def build_plotly_chart(data: pd.DataFrame, title: str) -> go.Figure:
 
     for year, grp in data.groupby("ISOYear"):
         weekly_vals = (grp.sort_values("ASSESSDATE")
-                     .groupby("Week")["VALUE"]
-                     .last()   # <== dernière valeur de la semaine
-                     .reindex(range(1, 54)))
+                        .groupby("Week", sort=False)["VALUE"]
+                        .last()
+                        .reindex(range(1, 54)))
         color, opacity = None, 1.0
         if year == 2025: color = COLOR_2025
         elif year == 2024: color = COLOR_2024
@@ -253,7 +257,7 @@ def generate_stocks_tab():
         st.rerun()
 
     df = load_data()
-    df = df[df["Year"] >= 2015].copy()
+    df = df[df["ISOYear"] >= 2015].copy()
 
     regions = sorted(df["TITLE"].unique())
     c1, c2 = st.columns([2, 1])
@@ -263,7 +267,9 @@ def generate_stocks_tab():
         miny, maxy = int(df["ISOYear"].min()), int(df["ISOYear"].max())
         years = st.slider("Années à afficher", miny, maxy, (max(miny, maxy-5), maxy))
 
-        df = df[df["TITLE"].isin(selected) & df["ISOYear"].between(years[0], years[1])]
+    # <-- en dehors du with
+    df = df[df["TITLE"].isin(selected) & df["ISOYear"].between(years[0], years[1])]
+
 
     for title in selected:
         temp = df[df["TITLE"] == title]
