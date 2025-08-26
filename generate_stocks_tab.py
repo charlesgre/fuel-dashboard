@@ -107,8 +107,9 @@ def _read_excel_all(path: str) -> tuple[pd.DataFrame, str]:
                 continue
 
             # add year/week
-            df["Year"] = df["ASSESSDATE"].dt.year
-            df["Week"] = df["ASSESSDATE"].dt.isocalendar().week.astype(int)
+            wk = df["ASSESSDATE"].dt.isocalendar()
+            df["ISOYear"] = wk.year.astype(int)
+            df["Week"]    = wk.week.astype(int)
 
             return df, sheet
         except Exception as e:
@@ -158,8 +159,9 @@ def load_data() -> pd.DataFrame:
     df = df[df["TITLE"].notna()].copy()
 
     # derive year/week
-    df["Year"] = df["ASSESSDATE"].dt.year
-    df["Week"] = df["ASSESSDATE"].dt.isocalendar().week.astype(int)
+    wk = df["ASSESSDATE"].dt.isocalendar()
+    df["ISOYear"] = wk.year.astype(int)
+    df["Week"]    = wk.week.astype(int)
 
     st.caption(f"Using sheet: **{chosen}** from `{os.path.basename(path)}`")
     return df
@@ -167,7 +169,7 @@ def load_data() -> pd.DataFrame:
 
 # ---------- weekly stats ----------
 def weekly_stats(hist_df: pd.DataFrame):
-    pivot = hist_df.groupby(["Week", "Year"])["VALUE"].mean().unstack()
+    pivot = hist_df.groupby(["Week", "ISOYear"])["VALUE"].mean().unstack()
     pivot = pivot.reindex(pd.Index(range(1, 54), name="Week"))
     return pivot.mean(axis=1), pivot.min(axis=1), pivot.max(axis=1)
 
@@ -204,7 +206,7 @@ def compute_change_table(df_region: pd.DataFrame):
 
 # ---------- Plotly chart ----------
 def build_plotly_chart(data: pd.DataFrame, title: str) -> go.Figure:
-    hist = data[(data["Year"] >= HIST_START) & (data["Year"] <= HIST_END)]
+    hist = data[(data["ISOYear"] >= HIST_START) & (data["ISOYear"] <= HIST_END)]
     mean_vals, min_vals, max_vals = weekly_stats(hist); x = mean_vals.index
 
     fig = go.Figure()
@@ -214,8 +216,11 @@ def build_plotly_chart(data: pd.DataFrame, title: str) -> go.Figure:
     fig.add_trace(go.Scatter(x=x, y=mean_vals, mode="lines",
                              line=dict(color="black", dash="dash", width=2), name=f"Moyenne {HIST_START}–{HIST_END}"))
 
-    for year, grp in data.groupby("Year"):
-        weekly_vals = grp.groupby("Week")["VALUE"].mean().reindex(range(1, 54))
+    for year, grp in data.groupby("ISOYear"):
+        weekly_vals = (grp.sort_values("ASSESSDATE")
+                     .groupby("Week")["VALUE"]
+                     .last()   # <== dernière valeur de la semaine
+                     .reindex(range(1, 54)))
         color, opacity = None, 1.0
         if year == 2025: color = COLOR_2025
         elif year == 2024: color = COLOR_2024
@@ -255,10 +260,10 @@ def generate_stocks_tab():
     with c1:
         selected = st.multiselect("Régions", regions, default=regions)
     with c2:
-        miny, maxy = int(df["Year"].min()), int(df["Year"].max())
+        miny, maxy = int(df["ISOYear"].min()), int(df["ISOYear"].max())
         years = st.slider("Années à afficher", miny, maxy, (max(miny, maxy-5), maxy))
 
-    df = df[df["TITLE"].isin(selected) & df["Year"].between(years[0], years[1])]
+        df = df[df["TITLE"].isin(selected) & df["ISOYear"].between(years[0], years[1])]
 
     for title in selected:
         temp = df[df["TITLE"] == title]
