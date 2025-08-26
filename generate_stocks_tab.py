@@ -122,15 +122,18 @@ def _read_excel_all(path: str, _mtime: float) -> tuple[pd.DataFrame, str]:
     raise ValueError(f"No usable sheet found in {os.path.basename(path)}. Sheets: {xls.sheet_names}")
 
 def load_data() -> pd.DataFrame:
-    # essaye d'abord le fichier à la racine, puis dans Stocks/
     candidates = [
         "Data global stocks.xlsx",
         os.path.join("Stocks", "Data global stocks.xlsx"),
     ]
-    path = next((p for p in candidates if os.path.exists(p)), candidates[0])
-    if not os.path.exists(path):
-        st.error(f"Excel not found: {path}")
+    existing = [p for p in candidates if os.path.exists(p)]
+    if not existing:
+        st.error(f"Excel not found. Tried: {candidates}")
         st.stop()
+
+    # --> PREND LA COPIE LA PLUS RÉCENTE
+    path = max(existing, key=os.path.getmtime)
+
 
     df, chosen = _read_excel_all(path, os.path.getmtime(path))
 
