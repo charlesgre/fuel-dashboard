@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from pathlib import Path
 
 # ========= CONFIG =========
 EXCEL_REL_PATH = os.path.join("Stocks", "Data global stocks.xlsx")
@@ -121,59 +122,66 @@ def _read_excel_all(path: str, _mtime: float) -> tuple[pd.DataFrame, str]:
                          f"Sheets: {xls.sheet_names}. Last error: {last_error}")
     raise ValueError(f"No usable sheet found in {os.path.basename(path)}. Sheets: {xls.sheet_names}")
 
+from pathlib import Path
+
 def load_data() -> pd.DataFrame:
+    # Base = racine du repo donnée par app.py (fallback = dossier du module)
+    base = Path(os.environ.get("FUEL_DASH_DATA_ROOT", Path(__file__).resolve().parent))
+
+    # Candidats dans la racine du projet
     candidates = [
-        "Data global stocks.xlsx",
-        os.path.join("Stocks", "Data global stocks.xlsx"),
+        base / "Data global stocks.xlsx",
+        base / "Stocks" / "Data global stocks.xlsx",
     ]
-    existing = [p for p in candidates if os.path.exists(p)]
+    existing = [p for p in candidates if p.exists()]
     if not existing:
-        st.error(f"Excel not found. Tried: {candidates}")
+        st.error(f"Excel not found. Tried: {[str(p) for p in candidates]}")
         st.stop()
 
-    # --> PREND LA COPIE LA PLUS RÉCENTE
-    path = max(existing, key=os.path.getmtime)
+    # ✅ prendre la copie LA PLUS RÉCENTE
+    path = max(existing, key=lambda p: p.stat().st_mtime)
 
+    # lecture (le mtime invalide le cache si le fichier change)
+    df, chosen = _read_excel_all(str(path), path.stat().st_mtime)
 
-    df, chosen = _read_excel_all(path, os.path.getmtime(path))
-
-    # --- HARDEN types ---
+    # --- types ---
     df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce", dayfirst=True)
     df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
     df = df.dropna(subset=["ASSESSDATE", "VALUE"])
-
     df["DESCRIPTION"] = df["DESCRIPTION"].astype(str).fillna("")
 
-
-    # --- Robust title mapping ---
+    # --- mapping titres ---
     def map_title(desc) -> str | None:
-        # exact map first
-        if desc in TITLE_MAP:
-            return TITLE_MAP[desc]
-
-        s = str(desc).lower() if not isinstance(desc, str) else desc.lower()
-
-        if ("resid" in s or "residual" in s) and "ara" in s:
-            return "ARA stocks"
-        if "padd" in s and "3" in s:
-            return "PADD 3 stocks"
-        if "fujairah" in s or "fedcom" in s:
-            return "Fujairah stocks"
-        if "singapore" in s:
-            return "Singapore stocks"
+        if desc in TITLE_MAP: return TITLE_MAP[desc]
+        s = str(desc).lower()
+        if ("resid" in s or "residual" in s) and "ara" in s: return "ARA stocks"
+        if "padd" in s and "3" in s: return "PADD 3 stocks"
+        if "fujairah" in s or "fedcom" in s: return "Fujairah stocks"
+        if "singapore" in s: return "Singapore stocks"
         return None
 
     df["TITLE"] = df["DESCRIPTION"].map(map_title)
     df = df[df["TITLE"].notna()].copy()
 
-    # derive year/week
+    # --- ISO Year/Week ---
     wk = df["ASSESSDATE"].dt.isocalendar()
     df["ISOYear"] = wk.year.astype(int)
     df["Week"]    = wk.week.astype(int)
 
-    st.caption(f"Using sheet: **{chosen}** from `{os.path.basename(path)}`")
-    return df
+    # 🔎 Debug visible : chemin absolu + mtime
+    st.caption(
+        f"Using sheet: **{chosen}** | file: `{path.resolve()}` | "
+        f"modified: {dt.datetime.fromtimestamp(path.stat().st_mtime):%Y-%m-%d %H:%M:%S}"
+    )
 
+    # 🔎 Debug utile : dernière date/valeur par titre (tu vois tout de suite si ça colle)
+    latest = (df.sort_values("ASSESSDATE")
+                .groupby("TITLE", as_index=False)
+                .agg(LatestDate=("ASSESSDATE","last"), LatestValue=("VALUE","last")))
+    latest["LatestDate"] = latest["LatestDate"].dt.strftime("%d-%m-%Y")
+    st.dataframe(latest, use_container_width=True, hide_index=True)
+
+    return df
 
 # ---------- weekly stats ----------
 def weekly_stats(hist_df: pd.DataFrame):

@@ -22,6 +22,7 @@ st.title("📊 Fuel Dashboard")
 
 # ------------ Config EA_PDF_DIR (AVANT d'importer ea_balances) ------------
 repo_root = Path(__file__).resolve().parent
+os.environ["FUEL_DASH_DATA_ROOT"] = str(repo_root)
 local_default = repo_root / "EA balances"
 
 EA_DIR = os.getenv("EA_PDF_DIR", st.secrets.get("EA_PDF_DIR", str(local_default)))
