@@ -72,27 +72,30 @@ def _map_required_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- data loading (simple & robust) ----------
 @st.cache_data(show_spinner=False)
-def _read_excel_all(path: str, _mtime: float) -> tuple[pd.DataFrame, str]:
+def _read_excel_all(path: str, _mtime: float) -> tuple[pd.DataFrame, list[str]]:
     xls = pd.ExcelFile(path)
     sheet_order = [s for s in SHEET_CANDIDATES if s in xls.sheet_names] + \
                   [s for s in xls.sheet_names if s not in SHEET_CANDIDATES]
 
+    used_sheets = []
+    frames = []
     last_error = None
+
     for sheet in sheet_order:
         try:
             raw = pd.read_excel(path, sheet_name=sheet, header=0)
-            if raw.empty:
+            if raw is None or raw.empty:
                 continue
-            # ensure string column names
+
             raw.columns = [str(c) for c in raw.columns]
             df = _map_required_columns(raw)
 
-            # clean types
+            # types
             df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce", dayfirst=True)
             df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
             df = df.dropna(subset=["ASSESSDATE", "VALUE"])
 
-            # map titles (tolerant)
+            # mapping titres tolérant
             def map_title(d):
                 if d in TITLE_MAP: return TITLE_MAP[d]
                 s = str(d).lower()
@@ -103,24 +106,34 @@ def _read_excel_all(path: str, _mtime: float) -> tuple[pd.DataFrame, str]:
                 return None
 
             df["TITLE"] = df["DESCRIPTION"].map(map_title)
-            df = df[df["TITLE"].notna()].copy()
-            if df.empty:
-                continue
+            if df["TITLE"].notna().any():
+                used_sheets.append(sheet)
+                frames.append(df[df["TITLE"].notna()].copy())
 
-            # add year/week
-            wk = df["ASSESSDATE"].dt.isocalendar()
-            df["ISOYear"] = wk.year.astype(int)
-            df["Week"]    = wk.week.astype(int)
-
-            return df, sheet
         except Exception as e:
             last_error = e
             continue
 
-    if last_error:
-        raise ValueError(f"Unable to parse any sheet in {os.path.basename(path)}. "
-                         f"Sheets: {xls.sheet_names}. Last error: {last_error}")
-    raise ValueError(f"No usable sheet found in {os.path.basename(path)}. Sheets: {xls.sheet_names}")
+    if not frames:
+        if last_error:
+            raise ValueError(f"Unable to parse any sheet in {os.path.basename(path)}. "
+                             f"Sheets: {xls.sheet_names}. Last error: {last_error}")
+        raise ValueError(f"No usable sheet found in {os.path.basename(path)}. Sheets: {xls.sheet_names}")
+
+    # ✅ concatène TOUTES les feuilles valides
+    out = pd.concat(frames, ignore_index=True)
+
+    # ISO year/week
+    wk = out["ASSESSDATE"].dt.isocalendar()
+    out["ISOYear"] = wk.year.astype(int)
+    out["Week"] = wk.week.astype(int)
+
+    # UOM manquant
+    if "UOM" not in out.columns:
+        out["UOM"] = ""
+
+    return out, used_sheets
+
 
 from pathlib import Path
 
@@ -142,7 +155,7 @@ def load_data() -> pd.DataFrame:
     path = max(existing, key=lambda p: p.stat().st_mtime)
 
     # lecture (le mtime invalide le cache si le fichier change)
-    df, chosen = _read_excel_all(str(path), path.stat().st_mtime)
+    df, used_sheets = _read_excel_all(str(path), path.stat().st_mtime)
 
     # --- types ---
     df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce", dayfirst=True)
@@ -170,9 +183,13 @@ def load_data() -> pd.DataFrame:
 
     # 🔎 Debug visible : chemin absolu + mtime
     st.caption(
-        f"Using sheet: **{chosen}** | file: `{path.resolve()}` | "
-        f"modified: {dt.datetime.fromtimestamp(path.stat().st_mtime):%Y-%m-%d %H:%M:%S}"
+        "Using sheets: **{sheets}** | file: `{file}` | modified: {ts}".format(
+            sheets=", ".join(used_sheets),
+            file=str(path.resolve()),
+            ts=dt.datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        )
     )
+
 
     # 🔎 Debug utile : dernière date/valeur par titre (tu vois tout de suite si ça colle)
     latest = (df.sort_values("ASSESSDATE")
