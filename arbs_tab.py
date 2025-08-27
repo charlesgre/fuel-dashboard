@@ -13,6 +13,13 @@ from openpyxl.utils.cell import range_boundaries
 DEFAULT_XLSX_PATH = "Arbs/Arbsheet updated.xlsx"
 DEFAULT_SHEET = "MAIN"
 
+# just under the imports / constants
+SIGN_COLOR_ROW_LABELS = {
+    "rmg", "rmg med", "rmg us",
+    "0.5%", "0.5 med", "0.5 us",
+    "0.5", "0.005"  # include both notations, keep whichever you use
+}
+
 @dataclass(frozen=True)
 class Merge:
     min_col: int
@@ -250,18 +257,27 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
         '<table class="arbs-table">'
     ]
 
+    # map all merged ranges so we can skip covered cells
     covered = set()
     for (tl_r, tl_c), m in merges.items():
-        for r in range(m.min_row, m.max_row+1):
-            for c in range(m.min_col, m.max_col+1):
+        for r in range(m.min_row, m.max_row + 1):
+            for c in range(m.min_col, m.max_col + 1):
                 if not (r == tl_r and c == tl_c):
                     covered.add((r, c))
 
-    for r in range(min_r, max_r+1):
-        if _is_row_hidden(ws, r): continue
+    for r in range(min_r, max_r + 1):
+        if _is_row_hidden(ws, r):
+            continue
         html.append("<tr>")
-        for c in range(min_c, max_c+1):
-            if _is_col_hidden(ws, c) or (r, c) in covered: continue
+
+        # first visible column (row label lives here)
+        first_vis_col = min_c
+        row_label_raw = ws.cell(r, first_vis_col).value
+        row_label = (str(row_label_raw).strip().lower()) if row_label_raw is not None else ""
+
+        for c in range(min_c, max_c + 1):
+            if _is_col_hidden(ws, c) or (r, c) in covered:
+                continue
 
             cell = ws.cell(r, c)
             m = merges.get((r, c))
@@ -275,25 +291,33 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
             styles = []
             styles.append(_border_css(cell.border))
             styles.append(_align_css(cell.alignment))
-            # fond Excel (titres, séparateurs)
+            # Excel fill (headers, section bars, etc.)
             styles.append(_fill_css(cell.fill, fallback_blue=use_blue))
-            # couleur rouge/verte suivant le signe si aucun fond explicite
-            styles.append(_value_sign_bg(cell))
-            # police
+
+            # --- apply red/green only for whitelisted data rows, and not on the label column ---
+            allow_sign_color = (row_label in SIGN_COLOR_ROW_LABELS) and (c != first_vis_col)
+            if allow_sign_color:
+                styles.append(_value_sign_bg(cell))
+
+            # font color/weight
             styles.append(_font_css(cell.font, force_white=(use_blue or dark_bg)))
-            # garde-fou bordure légère
-            if not cell.border or not any(getattr(cell.border, s).style for s in ("left","right","top","bottom")):
+
+            # safety: light border if none present
+            if not cell.border or not any(getattr(cell.border, s).style for s in ("left", "right", "top", "bottom")):
                 styles.append("border:1px solid #e6e6e6;")
 
-            # valeur formatée (dates/nombres)
+            # value formatting (dates/numbers)
             value_html = _format_cell_value(cell)
 
             html.append(
                 f'<td rowspan="{rs}" colspan="{cs}" style="{"".join(styles)}">{value_html}</td>'
             )
+
         html.append("</tr>")
+
     html.append("</table></div>")
     return "".join(html)
+
 
 # ===================== STREAMLIT TAB =====================
 def render():
