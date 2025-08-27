@@ -245,6 +245,12 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
     min_r, max_r, min_c, max_c = _visible_bounds(ws, col_cap)
     merges = _collect_merges(ws)
 
+    def _merge_covering(r: int, c: int) -> Optional[Merge]:
+        for (tl_r, tl_c), m in merges.items():
+            if m.min_row <= r <= m.max_row and m.min_col <= c <= m.max_col:
+                return m
+        return None
+
     html = [
         '<div style="overflow:auto; max-height:80vh; border:1px solid #ddd; padding:8px;">',
         """
@@ -257,23 +263,32 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
         '<table class="arbs-table">'
     ]
 
-    # map all merged ranges so we can skip covered cells
+    # cells couvertes par des merges (à ne pas rendre)
     covered = set()
     for (tl_r, tl_c), m in merges.items():
-        for r in range(m.min_row, m.max_row + 1):
-            for c in range(m.min_col, m.max_col + 1):
-                if not (r == tl_r and c == tl_c):
-                    covered.add((r, c))
+        for rr in range(m.min_row, m.max_row + 1):
+            for cc in range(m.min_col, m.max_col + 1):
+                if not (rr == tl_r and cc == tl_c):
+                    covered.add((rr, cc))
+
+    first_vis_col = min_c  # la colonne des libellés
 
     for r in range(min_r, max_r + 1):
         if _is_row_hidden(ws, r):
             continue
         html.append("<tr>")
 
-        # first visible column (row label lives here)
-        first_vis_col = min_c
-        row_label_raw = ws.cell(r, first_vis_col).value
-        row_label = (str(row_label_raw).strip().lower()) if row_label_raw is not None else ""
+        # ---- détection du libellé de ligne + si on est sur la ligne d’ancre du merge ----
+        m_firstcol = _merge_covering(r, first_vis_col)
+        if m_firstcol:
+            # valeur du coin haut-gauche du merge
+            label_cell = ws.cell(m_firstcol.min_row, m_firstcol.min_col)
+            row_label = (str(label_cell.value or "").strip().lower())
+            on_anchor_row = (r == m_firstcol.min_row)
+        else:
+            label_cell = ws.cell(r, first_vis_col)
+            row_label = (str(label_cell.value or "").strip().lower())
+            on_anchor_row = True  # pas de merge, donc la ligne courante est l’ancre
 
         for c in range(min_c, max_c + 1):
             if _is_col_hidden(ws, c) or (r, c) in covered:
@@ -291,22 +306,19 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
             styles = []
             styles.append(_border_css(cell.border))
             styles.append(_align_css(cell.alignment))
-            # Excel fill (headers, section bars, etc.)
             styles.append(_fill_css(cell.fill, fallback_blue=use_blue))
 
-            # --- apply red/green only for whitelisted data rows, and not on the label column ---
-            allow_sign_color = (row_label in SIGN_COLOR_ROW_LABELS) and (c != first_vis_col)
+            # ---- rouge/vert UNIQUEMENT sur la ligne d’ancre d’un libellé whiteliste,
+            #      et jamais sur la colonne de libellé elle-même ----
+            allow_sign_color = (on_anchor_row and row_label in SIGN_COLOR_ROW_LABELS and c != first_vis_col)
             if allow_sign_color:
                 styles.append(_value_sign_bg(cell))
 
-            # font color/weight
             styles.append(_font_css(cell.font, force_white=(use_blue or dark_bg)))
 
-            # safety: light border if none present
             if not cell.border or not any(getattr(cell.border, s).style for s in ("left", "right", "top", "bottom")):
                 styles.append("border:1px solid #e6e6e6;")
 
-            # value formatting (dates/numbers)
             value_html = _format_cell_value(cell)
 
             html.append(
@@ -317,6 +329,7 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
 
     html.append("</table></div>")
     return "".join(html)
+
 
 
 # ===================== STREAMLIT TAB =====================
