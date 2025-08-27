@@ -139,23 +139,27 @@ def _format_cell_value(cell) -> str:
     # fallback
     return str(v).replace("\n", "<br>")
 
-def _value_sign_bg(cell) -> str:
+def _value_sign_bg(cell, force: bool = False) -> str:
     """
-    Ajoute un fond rouge/vert selon le signe de la valeur *uniquement si la cellule
-    n'a pas déjà un remplissage explicite*.
+    Renvoie un background rouge/vert selon le signe.
+    - Si force=False : ne touche pas aux cellules qui ont déjà un fill Excel.
+    - Si force=True  : applique le rouge/vert même s'il y a déjà un fill (écrase).
     """
     v = cell.value
-    has_explicit_bg = bool(_hex_color(getattr(getattr(cell, "fill", None), "fgColor", None)))
-    if has_explicit_bg:
-        return ""
+
+    # Ne bloque pas si on force
+    if not force:
+        has_explicit_bg = bool(_hex_color(getattr(getattr(cell, "fill", None), "fgColor", None)))
+        if has_explicit_bg:
+            return ""
+
     if isinstance(v, (int, float)):
         if v < 0:
-            # rouge très clair, texte foncé lisible
-            return "background-color:#fee2e2;"
+            return "background-color:#fee2e2;"  # rouge clair
         if v > 0:
-            # vert très clair
-            return "background-color:#dcfce7;"
+            return "background-color:#dcfce7;"  # vert clair
     return ""
+
 
 # ---------- helpers sheet ----------
 def _is_col_hidden(ws, idx: int) -> bool:
@@ -328,7 +332,8 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
             # rouge/vert seulement sur la ligne d'ancre et pas sur la colonne du libellé
             allow_sign_color = (on_anchor_row and row_label in SIGN_COLOR_ROW_LABELS and c != label_col)
             if allow_sign_color:
-                styles.append(_value_sign_bg(cell))
+                # on écrase le fill existant (bleu) pour obtenir le rouge/vert
+                styles.append(_value_sign_bg(cell, force=True))
 
             styles.append(_font_css(cell.font, force_white=(use_blue or dark_bg)))
 
