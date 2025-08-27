@@ -17,7 +17,7 @@ DEFAULT_SHEET = "MAIN"
 SIGN_COLOR_ROW_LABELS = {
     "rmg", "rmg med", "rmg us",
     "0.5%", "0.5 med", "0.5 us",
-    "0.5", "0.0"   # <- important
+    "0.5", "0.50"   # <- important
 }
 
 @dataclass(frozen=True)
@@ -300,11 +300,11 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
         m_first = _merge_covering(r, label_col)
         if m_first:
             label_cell = ws.cell(m_first.min_row, m_first.min_col)
-            row_label = (str(label_cell.value or "").strip().lower())
+            row_label = re.sub(r"\s+", " ", str(label_cell.value or "").strip().lower())
             on_anchor_row = (r == m_first.min_row)
         else:
             label_cell = ws.cell(r, label_col)
-            row_label = (str(label_cell.value or "").strip().lower())
+            row_label = re.sub(r"\s+", " ", str(label_cell.value or "").strip().lower())
             on_anchor_row = True
 
         for c in range(min_c, max_c + 1):
