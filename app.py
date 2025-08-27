@@ -15,6 +15,7 @@ from streamlit_platts_tab import generate_platts_analytics_tab
 from generate_stocks_tab import generate_stocks_tab
 from fuel_vs_gas import generate_fuel_vs_gas_tab
 from technical_analysis_tab import render as render_technical
+from arbs_tab import render as render_arbs
 
 # ------------ Page config ------------
 st.set_page_config(page_title="Fuel Dashboard", layout="wide")
@@ -44,10 +45,10 @@ def get_ea_data_cached(_parser_version: str):
     return _load_ea_data()
 
 # ------------ Tabs ------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📊 Prices", "⛽ Bunker Diff", "CDD/Temperatures",
     "Balances (FGE / EA)", "📈 Forward Curves", "Platts Window",
-    "📦 Fuel Stocks", "Gas vs Fuel", "🔍 Technical Analysis"
+    "📦 Fuel Stocks", "Gas vs Fuel", "🔍 Technical Analysis", "📑 Arbs"
 ])
 
 # === TAB 1: PRICES ===
@@ -207,3 +208,7 @@ with tab8:
 # === TAB 9: TECHNICAL ANALYSIS ===
 with tab9:
     render_technical()
+
+# === TAB 10: ARBS ===
+with tab10:
+    render_arbs()
