@@ -17,7 +17,7 @@ DEFAULT_SHEET = "MAIN"
 SIGN_COLOR_ROW_LABELS = {
     "rmg", "rmg med", "rmg us",
     "0.5%", "0.5 med", "0.5 us",
-    "0.5", "0.005"  # include both notations, keep whichever you use
+    "0.5", "0.0"   # <- important
 }
 
 @dataclass(frozen=True)
@@ -251,6 +251,24 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
                 return m
         return None
 
+    def _find_label_col(r: int) -> int:
+        """Retourne la 1ʳᵉ colonne *utile* pour le libellé (ignore le spacer vide)."""
+        scan_to = min(max_c, min_c + 4)  # scanne les ~5 premières colonnes visibles
+        for c in range(min_c, scan_to + 1):
+            if _is_col_hidden(ws, c):
+                continue
+            cell = ws.cell(r, c)
+            # s'il y a un merge, regarde l'ancre
+            m = _merge_covering(r, c)
+            if m:
+                anchor_val = ws.cell(m.min_row, m.min_col).value
+                if not _is_empty(anchor_val):
+                    return c
+            # sinon, valeur directe
+            if not _is_empty(cell.value):
+                return c
+        return min_c  # fallback: la toute première
+
     html = [
         '<div style="overflow:auto; max-height:80vh; border:1px solid #ddd; padding:8px;">',
         """
@@ -263,7 +281,6 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
         '<table class="arbs-table">'
     ]
 
-    # cells couvertes par des merges (à ne pas rendre)
     covered = set()
     for (tl_r, tl_c), m in merges.items():
         for rr in range(m.min_row, m.max_row + 1):
@@ -271,24 +288,24 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
                 if not (rr == tl_r and cc == tl_c):
                     covered.add((rr, cc))
 
-    first_vis_col = min_c  # la colonne des libellés
-
     for r in range(min_r, max_r + 1):
         if _is_row_hidden(ws, r):
             continue
         html.append("<tr>")
 
-        # ---- détection du libellé de ligne + si on est sur la ligne d’ancre du merge ----
-        m_firstcol = _merge_covering(r, first_vis_col)
-        if m_firstcol:
-            # valeur du coin haut-gauche du merge
-            label_cell = ws.cell(m_firstcol.min_row, m_firstcol.min_col)
+        # --- trouver la vraie colonne libellé pour cette ligne ---
+        label_col = _find_label_col(r)
+
+        # --- récupérer le libellé + savoir si on est sur la ligne d'ancre du merge ---
+        m_first = _merge_covering(r, label_col)
+        if m_first:
+            label_cell = ws.cell(m_first.min_row, m_first.min_col)
             row_label = (str(label_cell.value or "").strip().lower())
-            on_anchor_row = (r == m_firstcol.min_row)
+            on_anchor_row = (r == m_first.min_row)
         else:
-            label_cell = ws.cell(r, first_vis_col)
+            label_cell = ws.cell(r, label_col)
             row_label = (str(label_cell.value or "").strip().lower())
-            on_anchor_row = True  # pas de merge, donc la ligne courante est l’ancre
+            on_anchor_row = True
 
         for c in range(min_c, max_c + 1):
             if _is_col_hidden(ws, c) or (r, c) in covered:
@@ -308,27 +325,24 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
             styles.append(_align_css(cell.alignment))
             styles.append(_fill_css(cell.fill, fallback_blue=use_blue))
 
-            # ---- rouge/vert UNIQUEMENT sur la ligne d’ancre d’un libellé whiteliste,
-            #      et jamais sur la colonne de libellé elle-même ----
-            allow_sign_color = (on_anchor_row and row_label in SIGN_COLOR_ROW_LABELS and c != first_vis_col)
+            # rouge/vert seulement sur la ligne d'ancre et pas sur la colonne du libellé
+            allow_sign_color = (on_anchor_row and row_label in SIGN_COLOR_ROW_LABELS and c != label_col)
             if allow_sign_color:
                 styles.append(_value_sign_bg(cell))
 
             styles.append(_font_css(cell.font, force_white=(use_blue or dark_bg)))
 
-            if not cell.border or not any(getattr(cell.border, s).style for s in ("left", "right", "top", "bottom")):
+            if not cell.border or not any(getattr(cell.border, s).style for s in ("left","right","top","bottom")):
                 styles.append("border:1px solid #e6e6e6;")
 
             value_html = _format_cell_value(cell)
-
-            html.append(
-                f'<td rowspan="{rs}" colspan="{cs}" style="{"".join(styles)}">{value_html}</td>'
-            )
+            html.append(f'<td rowspan="{rs}" colspan="{cs}" style="{"".join(styles)}">{value_html}</td>')
 
         html.append("</tr>")
 
     html.append("</table></div>")
     return "".join(html)
+
 
 
 
