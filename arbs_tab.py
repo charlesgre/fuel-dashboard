@@ -119,25 +119,41 @@ def _is_row_hidden(ws, idx: int) -> bool:
 def _visible_bounds(ws):
     """
     Retourne les bornes (min_row, max_row, min_col, max_col) utiles,
-    en excluant intégralement les lignes/colonnes masquées aux extrémités.
+    en excluant les lignes/colonnes masquées et les colonnes vides à droite.
     """
     max_r = ws.max_row
     max_c = ws.max_column
+
     # borne min row
     min_r = 1
     while min_r <= max_r and _is_row_hidden(ws, min_r):
         min_r += 1
+
     # borne max row
     while max_r >= 1 and _is_row_hidden(ws, max_r):
         max_r -= 1
+
     # borne min col
     min_c = 1
     while min_c <= max_c and _is_col_hidden(ws, min_c):
         min_c += 1
-    # borne max col
-    while max_c >= 1 and _is_col_hidden(ws, max_c):
+
+    # borne max col → on coupe les colonnes vides/None à droite
+    while max_c >= min_c:
+        if not _is_col_hidden(ws, max_c):
+            # Vérifie si cette colonne contient au moins une valeur
+            has_value = False
+            for r in range(min_r, max_r + 1):
+                val = ws.cell(r, max_c).value
+                if val not in (None, ""):
+                    has_value = True
+                    break
+            if has_value:
+                break
         max_c -= 1
+
     return max(min_r, 1), max_r, max(min_c, 1), max_c
+
 
 def _collect_merges(ws) -> Dict[Tuple[int, int], Merge]:
     """
