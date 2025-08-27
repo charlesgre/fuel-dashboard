@@ -3,6 +3,7 @@ from __future__ import annotations
 import io, re
 from dataclasses import dataclass
 from typing import Dict, Tuple, Optional
+from datetime import datetime, date, time
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
@@ -91,6 +92,64 @@ def _fill_css(fill, fallback_blue=False):
         pass
     return ""
 
+# ---------- formatage valeurs ----------
+def _decimals_from_number_format(fmt: str | None) -> Optional[int]:
+    """Essaye d'inférer le nombre de décimales d'après le format Excel."""
+    if not fmt:
+        return None
+    # exemples: "0", "0.0", "0.00", "#,##0.000", "0.00_);[Red](0.00)"
+    m = re.search(r"\.(0+)", fmt)
+    if m:
+        return len(m.group(1))
+    return None
+
+def _format_cell_value(cell) -> str:
+    """Formate la valeur comme Excel dans tes tableaux: dates dd.MMM, chiffres avec décimales correctes."""
+    v = cell.value
+    if v is None:
+        return ""
+    # dates
+    if isinstance(v, (datetime, date)):
+        d: datetime = v if isinstance(v, datetime) else datetime.combine(v, time.min)
+        return d.strftime("%d.%b")
+    # texte direct
+    if isinstance(v, str):
+        # tente parsing de date ISO provenant d'Excel (ex: "2025-09-30 00:00:00")
+        try:
+            d = datetime.fromisoformat(v.strip())
+            return d.strftime("%d.%b")
+        except Exception:
+            return v.replace("\n", "<br>")
+    # nombres
+    if isinstance(v, (int, float)):
+        dec = _decimals_from_number_format(getattr(cell, "number_format", None))
+        if dec is None:
+            # par défaut: int → 0 décimales, float → 2 décimales
+            dec = 0 if isinstance(v, int) or float(v).is_integer() else 2
+        if dec == 0:
+            return f"{int(round(v)):,}".replace(",", " ")
+        return f"{v:,.{dec}f}".replace(",", " ")
+    # fallback
+    return str(v).replace("\n", "<br>")
+
+def _value_sign_bg(cell) -> str:
+    """
+    Ajoute un fond rouge/vert selon le signe de la valeur *uniquement si la cellule
+    n'a pas déjà un remplissage explicite*.
+    """
+    v = cell.value
+    has_explicit_bg = bool(_hex_color(getattr(getattr(cell, "fill", None), "fgColor", None)))
+    if has_explicit_bg:
+        return ""
+    if isinstance(v, (int, float)):
+        if v < 0:
+            # rouge très clair, texte foncé lisible
+            return "background-color:#fee2e2;"
+        if v > 0:
+            # vert très clair
+            return "background-color:#dcfce7;"
+    return ""
+
 # ---------- helpers sheet ----------
 def _is_col_hidden(ws, idx: int) -> bool:
     cd = ws.column_dimensions.get(get_column_letter(idx))
@@ -105,10 +164,6 @@ def _is_empty(v) -> bool:
 
 def _detect_right_cut(ws, min_r, max_r, min_c, max_c,
                       look_rows: int = 120, empty_run_needed: int = 5) -> int:
-    """
-    Coupe à la première séquence d'au moins `empty_run_needed` colonnes vides consécutives,
-    en n'observant que les `look_rows` premières lignes (le cœur des tableaux).
-    """
     look_to_row = min(max_r, min_r + look_rows - 1)
     last_val_col = min_c
     empty_run = 0
@@ -117,7 +172,7 @@ def _detect_right_cut(ws, min_r, max_r, min_c, max_c,
             continue
         has_val = False
         for r in range(min_r, look_to_row + 1):
-            if _is_row_hidden(ws, r): 
+            if _is_row_hidden(ws, r):
                 continue
             if not _is_empty(ws.cell(r, c).value):
                 has_val = True
@@ -132,10 +187,6 @@ def _detect_right_cut(ws, min_r, max_r, min_c, max_c,
     return last_val_col
 
 def _visible_bounds(ws, col_cap: Optional[int] = None):
-    """
-    Borne visible + coupe zone commentaires à droite.
-    `col_cap` permet d'imposer un nombre max de colonnes (UI).
-    """
     max_r = ws.max_row
     max_c = ws.max_column
 
@@ -149,20 +200,17 @@ def _visible_bounds(ws, col_cap: Optional[int] = None):
     while min_c <= max_c and _is_col_hidden(ws, min_c):
         min_c += 1
 
-    # Détection du “mur noir” à droite
     detected_end = _detect_right_cut(
         ws, min_r, max_r, min_c, max_c, look_rows=120, empty_run_needed=5
     )
     max_c = detected_end
 
-    # ✅ si aucun cap manuel → 18 par défaut
     if col_cap is None:
         max_c = min(max_c, 18)
     elif isinstance(col_cap, int) and col_cap > 0:
         max_c = min(max_c, min_c + col_cap - 1)
 
     return max(min_r, 1), max_r, max(min_c, 1), max_c
-
 
 def _collect_merges(ws) -> Dict[Tuple[int, int], Merge]:
     merges: Dict[Tuple[int,int], Merge] = {}
@@ -195,7 +243,7 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
         """
         <style>
         .arbs-table { border-collapse:collapse; font-family:Inter,system-ui,Arial; font-size:13px; }
-        .arbs-table tr:nth-child(even) td { background-color:#fafafa; }  /* zebra rows */
+        .arbs-table tr:nth-child(even) td { background-color:#fafafa; }
         .arbs-table td { padding:4px 8px; }
         </style>
         """,
@@ -227,16 +275,22 @@ def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
             styles = []
             styles.append(_border_css(cell.border))
             styles.append(_align_css(cell.alignment))
+            # fond Excel (titres, séparateurs)
             styles.append(_fill_css(cell.fill, fallback_blue=use_blue))
+            # couleur rouge/verte suivant le signe si aucun fond explicite
+            styles.append(_value_sign_bg(cell))
+            # police
             styles.append(_font_css(cell.font, force_white=(use_blue or dark_bg)))
+            # garde-fou bordure légère
             if not cell.border or not any(getattr(cell.border, s).style for s in ("left","right","top","bottom")):
                 styles.append("border:1px solid #e6e6e6;")
 
-            val = cell.value
-            value = "" if _is_empty(val) else str(val)
-            value = re.sub(r"\n", "<br>", value)
+            # valeur formatée (dates/nombres)
+            value_html = _format_cell_value(cell)
 
-            html.append(f'<td rowspan="{rs}" colspan="{cs}" style="{"".join(styles)}">{value}</td>')
+            html.append(
+                f'<td rowspan="{rs}" colspan="{cs}" style="{"".join(styles)}">{value_html}</td>'
+            )
         html.append("</tr>")
     html.append("</table></div>")
     return "".join(html)
@@ -249,14 +303,11 @@ def render():
     col1, col2, col3 = st.columns([1,1,1], gap="small")
     editable   = col1.toggle("Mode éditable (grid)", value=False)
     show_export= col2.toggle("Activer export XLSX", value=True)
-    # Limiteur manuel de colonnes (0 = auto)
     col_cap = col3.number_input(
-        "Max colonnes à afficher (18 = par défaut)", 
+        "Max colonnes à afficher (18 = par défaut)",
         min_value=0, max_value=200, value=18, step=1
     )
     cap = int(col_cap) if col_cap and col_cap > 0 else None
-
-
 
     try:
         wb = load_workbook(path, data_only=True)
@@ -269,8 +320,10 @@ def render():
         st.warning("Aucune feuille visible dans ce classeur.")
         st.stop()
 
-    sheet = st.selectbox("Feuille source :", visible_sheets,
-                         index=visible_sheets.index(DEFAULT_SHEET) if DEFAULT_SHEET in visible_sheets else 0)
+    sheet = st.selectbox(
+        "Feuille source :", visible_sheets,
+        index=visible_sheets.index(DEFAULT_SHEET) if DEFAULT_SHEET in visible_sheets else 0
+    )
     ws = wb[sheet]
     cap = int(col_cap) if col_cap and col_cap > 0 else None
 
@@ -282,11 +335,13 @@ def render():
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 edited.to_excel(writer, sheet_name="Arbs", index=False)
-            st.download_button("Exporter la vue éditée en XLSX", data=out.getvalue(),
-                               file_name="Arbs_export.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(
+                "Exporter la vue éditée en XLSX", data=out.getvalue(),
+                file_name="Arbs_export.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
     else:
-        st.caption("Rendu fidèle d’Excel (fusions, styles, couleurs plus visibles).")
+        st.caption("Rendu fidèle d’Excel (fusions, styles, couleurs plus visibles + règles Excel).")
         html = _sheet_to_html(ws, cap)
         st.markdown(html, unsafe_allow_html=True)
 
@@ -295,9 +350,11 @@ def render():
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 df.to_excel(writer, sheet_name="Arbs_visible", index=False)
-            st.download_button("Exporter la zone visible en XLSX", data=out.getvalue(),
-                               file_name="Arbs_visible.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(
+                "Exporter la zone visible en XLSX", data=out.getvalue(),
+                file_name="Arbs_visible.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 if __name__ == "__main__":
     import streamlit.web.bootstrap
