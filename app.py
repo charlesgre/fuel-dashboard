@@ -20,13 +20,6 @@ from technical_analysis_tab import render as render_technical
 st.set_page_config(page_title="Fuel Dashboard", layout="wide")
 st.title("📊 Fuel Dashboard")
 
-# ---- Debug / Refresh global ----
-col_refresh = st.sidebar.container()
-if col_refresh.button("♻️ Clear ALL caches & rerun"):
-    st.cache_data.clear()
-    st.cache_resource.clear()
-    st.rerun()
-
 # ------------ Config EA_PDF_DIR (AVANT d'importer ea_balances) ------------
 repo_root = Path(__file__).resolve().parent
 os.environ["FUEL_DASH_DATA_ROOT"] = str(repo_root)
