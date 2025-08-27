@@ -21,6 +21,10 @@ from arbs_tab import render as render_arbs
 st.set_page_config(page_title="Fuel Dashboard", layout="wide")
 st.title("📊 Fuel Dashboard")
 
+if st.button("🔄 Force refresh"):
+    st.cache_data.clear()
+    st.rerun()
+
 # ------------ Config EA_PDF_DIR (AVANT d'importer ea_balances) ------------
 repo_root = Path(__file__).resolve().parent
 os.environ["FUEL_DASH_DATA_ROOT"] = str(repo_root)
