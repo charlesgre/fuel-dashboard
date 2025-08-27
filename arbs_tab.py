@@ -246,7 +246,7 @@ def render():
     show_export = col2.toggle("Activer export XLSX", value=True)
 
     try:
-        wb = load_workbook(path, data_only=False)
+        wb = load_workbook(path, data_only=True)
     except Exception as e:
         st.error(f"Impossible d’ouvrir le fichier : {e}")
         st.stop()
