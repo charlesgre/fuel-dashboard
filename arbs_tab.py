@@ -151,11 +151,13 @@ def _visible_bounds(ws, col_cap: Optional[int] = None):
                                      look_rows=120, empty_run_needed=5)
     max_c = detected_end
 
-    # Cap manuel
+    # Forcer un plafond dur (ex. 15 colonnes max)
+    max_c = min(max_c, 18)
+
+    # Cap manuel (UI)
     if isinstance(col_cap, int) and col_cap > 0:
         max_c = min(max_c, min_c + col_cap - 1)
 
-    return max(min_r, 1), max_r, max(min_c, 1), max_c
 
 def _collect_merges(ws) -> Dict[Tuple[int, int], Merge]:
     merges: Dict[Tuple[int,int], Merge] = {}
