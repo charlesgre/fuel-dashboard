@@ -140,23 +140,28 @@ def _visible_bounds(ws, col_cap: Optional[int] = None):
     max_c = ws.max_column
 
     min_r = 1
-    while min_r <= max_r and _is_row_hidden(ws, min_r): min_r += 1
-    while max_r >= 1 and _is_row_hidden(ws, max_r):     max_r -= 1
+    while min_r <= max_r and _is_row_hidden(ws, min_r):
+        min_r += 1
+    while max_r >= 1 and _is_row_hidden(ws, max_r):
+        max_r -= 1
 
     min_c = 1
-    while min_c <= max_c and _is_col_hidden(ws, min_c): min_c += 1
+    while min_c <= max_c and _is_col_hidden(ws, min_c):
+        min_c += 1
 
     # Détection du “mur noir” à droite
-    detected_end = _detect_right_cut(ws, min_r, max_r, min_c, max_c,
-                                     look_rows=120, empty_run_needed=5)
+    detected_end = _detect_right_cut(
+        ws, min_r, max_r, min_c, max_c, look_rows=120, empty_run_needed=5
+    )
     max_c = detected_end
 
-    # Forcer un plafond dur (ex. 15 colonnes max)
-    max_c = min(max_c, 18)
-
-    # Cap manuel (UI)
-    if isinstance(col_cap, int) and col_cap > 0:
+    # ✅ si aucun cap manuel → 18 par défaut
+    if col_cap is None:
+        max_c = min(max_c, 18)
+    elif isinstance(col_cap, int) and col_cap > 0:
         max_c = min(max_c, min_c + col_cap - 1)
+
+    return max(min_r, 1), max_r, max(min_c, 1), max_c
 
 
 def _collect_merges(ws) -> Dict[Tuple[int, int], Merge]:
@@ -245,7 +250,13 @@ def render():
     editable   = col1.toggle("Mode éditable (grid)", value=False)
     show_export= col2.toggle("Activer export XLSX", value=True)
     # Limiteur manuel de colonnes (0 = auto)
-    col_cap    = col3.number_input("Max colonnes à afficher (0 = auto)", min_value=0, max_value=200, value=0, step=1)
+    col_cap = col3.number_input(
+        "Max colonnes à afficher (18 = par défaut)", 
+        min_value=0, max_value=200, value=18, step=1
+    )
+    cap = int(col_cap) if col_cap and col_cap > 0 else None
+
+
 
     try:
         wb = load_workbook(path, data_only=True)
