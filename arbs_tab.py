@@ -147,7 +147,6 @@ def _value_sign_bg(cell, force: bool = False) -> str:
     """
     v = cell.value
 
-    # Ne bloque pas si on force
     if not force:
         has_explicit_bg = bool(_hex_color(getattr(getattr(cell, "fill", None), "fgColor", None)))
         if has_explicit_bg:
@@ -155,9 +154,9 @@ def _value_sign_bg(cell, force: bool = False) -> str:
 
     if isinstance(v, (int, float)):
         if v < 0:
-            return "background-color:#fee2e2;"  # rouge clair
+            return "background-color:#fca5a5; color:#000000;"  # rouge un peu plus foncé + texte noir
         if v > 0:
-            return "background-color:#dcfce7;"  # vert clair
+            return "background-color:#86efac; color:#000000;"  # vert un peu plus foncé + texte noir
     return ""
 
 
