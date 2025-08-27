@@ -1,26 +1,16 @@
 # arbs_tab.py
-# Onglet Streamlit pour afficher les tableaux "Arbs" depuis un fichier Excel
-# - Affiche UNIQUEMENT les lignes/colonnes non masquées
-# - Respecte les cellules fusionnées (rowspan/colspan)
-# - Récupère les couleurs, bords et gras principaux pour un rendu proche d'Excel
-# - Propose un mode alternatif "éditable" (grid) + export XLSX
-
 from __future__ import annotations
-import io
-import re
+import io, re
 from dataclasses import dataclass
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
-# --------- CONFIG PAR DÉFAUT ---------
-DEFAULT_XLSX_PATH = "Arbs/Arbsheet updated.xlsx"   # adapte si besoin
-DEFAULT_SHEET = "MAIN"                             # feuille source par défaut
-
-# -------------------------------------
+DEFAULT_XLSX_PATH = "Arbs/Arbsheet updated.xlsx"
+DEFAULT_SHEET = "MAIN"
 
 @dataclass(frozen=True)
 class Merge:
@@ -29,42 +19,48 @@ class Merge:
     max_col: int
     max_row: int
 
-def _hex_color(openpyxl_color) -> str | None:
-    """
-    Convertit openpyxl Color en #RRGGBB (ignore alpha si 'FF' ou None).
-    """
-    if not openpyxl_color:
+# ---------- helpers couleurs ----------
+def _hex_color(c) -> str | None:
+    if not c:
         return None
     try:
-        rgb = openpyxl_color.rgb  # ex: 'FFB6D7A8'
-        if rgb and len(rgb) == 8:
-            return f"#{rgb[2:]}"  # drop alpha
-        if rgb and len(rgb) == 6:
+        rgb = c.rgb
+        if not rgb:
+            return None
+        if len(rgb) == 8:  # AARRGGBB
+            return f"#{rgb[2:]}"
+        if len(rgb) == 6:
             return f"#{rgb}"
     except Exception:
         pass
     return None
 
+def _is_dark(hex_color: str) -> bool:
+    if not hex_color or not hex_color.startswith("#") or len(hex_color) != 7:
+        return False
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    # luminance simple
+    lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return lum < 80  # sombre
+
 def _border_css(b) -> str:
-    """
-    Renvoie une CSS border résumée à partir d'un Border openpyxl.
-    """
     if not b:
         return ""
-    sides = []
+    parts = []
     for side_name in ("left", "right", "top", "bottom"):
-        side = getattr(b, side_name)
+        side = getattr(b, side_name, None)
         if side and side.style:
-            # map styles
-            style = "solid"
             width = "1px"
+            style = "solid"
             if side.style in ("medium", "thick"):
                 width = "2px"
-            elif side.style in ("hair", "dotted", "dashDot"):
+            if side.style in ("hair", "dotted", "dashDot"):
                 style = "dotted"
-            color = _hex_color(side.color) or "#444444"
-            sides.append(f"border-{side_name}:{width} {style} {color};")
-    return "".join(sides)
+            color = _hex_color(side.color) or "#BEBEBE"
+            parts.append(f"border-{side_name}:{width} {style} {color};")
+    return "".join(parts)
 
 def _align_css(al):
     if not al:
@@ -73,18 +69,13 @@ def _align_css(al):
     if al.horizontal:
         parts.append(f"text-align:{al.horizontal};")
     if al.vertical:
-        # vertical -> translate to CSS baseline/middle/bottom
-        vmap = {"center": "middle"}.get(al.vertical, al.vertical)
-        parts.append(f"vertical-align:{vmap};")
-    if al.wrap_text:
-        parts.append("white-space:normal;")
-    else:
-        parts.append("white-space:nowrap;")
+        parts.append(f"vertical-align:{ {'center':'middle'}.get(al.vertical, al.vertical) };")
+    parts.append("white-space:normal;" if getattr(al, "wrap_text", False) else "white-space:nowrap;")
     return "".join(parts)
 
-def _font_css(f):
+def _font_css(f, force_white: bool=False):
     if not f:
-        return ""
+        return "font-size:13px;"
     parts = []
     if f.bold:
         parts.append("font-weight:700;")
@@ -92,22 +83,26 @@ def _font_css(f):
         parts.append("font-style:italic;")
     if f.size:
         parts.append(f"font-size:{f.size}px;")
-    color = _hex_color(f.color)
-    if color:
-        parts.append(f"color:{color};")
+    if force_white:
+        parts.append("color:#ffffff;")
+    else:
+        col = _hex_color(getattr(f, "color", None))
+        if col:
+            parts.append(f"color:{col};")
     return "".join(parts)
 
-def _fill_css(fill):
+def _fill_css(fill, fallback_blue=False):
     try:
-        # only pattern fills with fgColor
-        if fill and fill.fgColor:
-            color = _hex_color(fill.fgColor)
-            if color:
-                return f"background-color:{color};"
+        col = _hex_color(fill.fgColor) if fill and fill.fgColor else None
+        if fallback_blue:
+            return "background-color:#2c5282;"
+        if col:
+            return f"background-color:{col};"
     except Exception:
         pass
     return ""
 
+# ---------- helpers sheet ----------
 def _is_col_hidden(ws, idx: int) -> bool:
     cd = ws.column_dimensions.get(get_column_letter(idx))
     return bool(cd and cd.hidden)
@@ -116,65 +111,63 @@ def _is_row_hidden(ws, idx: int) -> bool:
     rd = ws.row_dimensions.get(idx)
     return bool(rd and rd.hidden)
 
+def _is_empty(v) -> bool:
+    return v is None or (isinstance(v, str) and v.strip() == "")
+
 def _visible_bounds(ws):
     """
-    Retourne les bornes (min_row, max_row, min_col, max_col) utiles,
-    en excluant les lignes/colonnes masquées et les colonnes vides à droite.
+    Tronque les colonnes vides à droite et coupe après >=3 colonnes vides consécutives.
     """
     max_r = ws.max_row
     max_c = ws.max_column
 
-    # borne min row
+    # min row / max row (skip hidden)
     min_r = 1
     while min_r <= max_r and _is_row_hidden(ws, min_r):
         min_r += 1
-
-    # borne max row
     while max_r >= 1 and _is_row_hidden(ws, max_r):
         max_r -= 1
 
-    # borne min col
+    # min col (skip hidden)
     min_c = 1
     while min_c <= max_c and _is_col_hidden(ws, min_c):
         min_c += 1
 
-    # borne max col → on coupe les colonnes vides/None à droite
-    while max_c >= min_c:
-        if not _is_col_hidden(ws, max_c):
-            # Vérifie si cette colonne contient au moins une valeur
-            has_value = False
-            for r in range(min_r, max_r + 1):
-                val = ws.cell(r, max_c).value
-                if val not in (None, ""):
-                    has_value = True
-                    break
-            if has_value:
+    # find last useful column scanning left->right with sentinel of empty run
+    last_val_col = min_c
+    empty_run = 0
+    for c in range(min_c, max_c + 1):
+        if _is_col_hidden(ws, c):
+            continue
+        has_val = False
+        for r in range(min_r, max_r + 1):
+            if _is_row_hidden(ws, r):
+                continue
+            if not _is_empty(ws.cell(r, c).value):
+                has_val = True
                 break
-        max_c -= 1
-
+        if has_val:
+            last_val_col = c
+            empty_run = 0
+        else:
+            empty_run += 1
+            if empty_run >= 3:
+                break
+    max_c = last_val_col
     return max(min_r, 1), max_r, max(min_c, 1), max_c
 
-
 def _collect_merges(ws) -> Dict[Tuple[int, int], Merge]:
-    """
-    Map (row, col) TOP-LEFT -> Merge(...)
-    + set pour tous les (r,c) couverts (afin de sauter les non top-left).
-    """
     merges: Dict[Tuple[int,int], Merge] = {}
     for rng in ws.merged_cells.ranges:
         min_c, min_r, max_c, max_r = range_boundaries(str(rng))
-        # si la zone contient une ligne/colonne masquée, on ignore la fusion
-        hidden = any(_is_row_hidden(ws, r) for r in range(min_r, max_r+1)) or \
-                 any(_is_col_hidden(ws, c) for c in range(min_c, max_c+1))
-        if hidden:
+        if any(_is_row_hidden(ws, r) for r in range(min_r, max_r+1)): 
+            continue
+        if any(_is_col_hidden(ws, c) for c in range(min_c, max_c+1)):
             continue
         merges[(min_r, min_c)] = Merge(min_c, min_r, max_c, max_r)
     return merges
 
 def _extract_dataframe(ws) -> pd.DataFrame:
-    """
-    DataFrame "à plat" des cellules visibles (permet mode éditable).
-    """
     min_r, max_r, min_c, max_c = _visible_bounds(ws)
     data = []
     for r in range(min_r, max_r+1):
@@ -190,22 +183,22 @@ def _extract_dataframe(ws) -> pd.DataFrame:
     return pd.DataFrame(data, columns=cols)
 
 def _sheet_to_html(ws) -> str:
-    """
-    Construit un tableau HTML riche qui respecte:
-    - colonnes/lignes visibles seulement
-    - fusions (rowspan/colspan)
-    - couleurs, bords, alignements, gras
-    """
     min_r, max_r, min_c, max_c = _visible_bounds(ws)
     merges = _collect_merges(ws)
 
-    # Table CSS de base
     html = [
         '<div style="overflow:auto; max-height:80vh; border:1px solid #ddd; padding:8px;">',
-        '<table style="border-collapse:collapse; font-family:Inter, system-ui, Arial; font-size:13px;">'
+        # Zebra rows + polices + largeur
+        """
+        <style>
+        .arbs-table { border-collapse:collapse; font-family:Inter,system-ui,Arial; font-size:13px; }
+        .arbs-table tr:nth-child(even) td { background-color:#fafafa; }
+        .arbs-table td { padding:4px 8px; }
+        </style>
+        """,
+        '<table class="arbs-table">'
     ]
 
-    # Pour ignorer les cellules couvertes par une fusion (non top-left)
     covered = set()
     for (tl_r, tl_c), m in merges.items():
         for r in range(m.min_row, m.max_row+1):
@@ -222,43 +215,42 @@ def _sheet_to_html(ws) -> str:
                 continue
 
             cell = ws.cell(r, c)
-            # fusion ?
-            rs = cs = 1
             m = merges.get((r, c))
-            if m:
-                rs = m.max_row - m.min_row + 1
-                cs = m.max_col - m.min_col + 1
+            rs = (m.max_row - m.min_row + 1) if m else 1
+            cs = (m.max_col - m.min_col + 1) if m else 1
 
-            # styles
+            # couleurs/contraste
+            raw_bg = _hex_color(getattr(getattr(cell, "fill", None), "fgColor", None))
+            dark_bg = _is_dark(raw_bg) if raw_bg else False
+            # si cellule en gras ou fond très sombre -> bleu lisible
+            use_blue = bool(getattr(cell.font, "bold", False)) or dark_bg
+
             styles = []
             styles.append(_border_css(cell.border))
             styles.append(_align_css(cell.alignment))
-            styles.append(_font_css(cell.font))
-            styles.append(_fill_css(cell.fill))
-            # padding + trait fin par défaut pour mieux coller à Excel
-            styles.append("padding:3px 6px;")
+            styles.append(_fill_css(cell.fill, fallback_blue=use_blue))
+            styles.append(_font_css(cell.font, force_white=(use_blue or dark_bg)))
             if not cell.border or not any(getattr(cell.border, s).style for s in ("left","right","top","bottom")):
-                styles.append("border:1px solid #e0e0e0;")
+                styles.append("border:1px solid #e6e6e6;")
 
-            value = "" if cell.value is None else str(cell.value)
-            # remplace \n par <br> pour multi-lignes
+            val = cell.value
+            value = "" if _is_empty(val) else str(val)
             value = re.sub(r"\n", "<br>", value)
 
-            td = f'<td rowspan="{rs}" colspan="{cs}" style="{"".join(styles)}">{value}</td>'
-            html.append(td)
+            html.append(
+                f'<td rowspan="{rs}" colspan="{cs}" style="{"".join(styles)}">{value}</td>'
+            )
         html.append("</tr>")
     html.append("</table></div>")
     return "".join(html)
 
 # ===================== STREAMLIT TAB =====================
-
 def render():
     st.header("Arbs")
 
-    # Choix du fichier
     path = st.text_input("Chemin du fichier Excel des arbs :", DEFAULT_XLSX_PATH)
     col1, col2 = st.columns([1,1], gap="small")
-    editable = col1.toggle("Mode éditable (grid)", value=False, help="Basculer entre rendu 'fidèle Excel' et un grid éditable.")
+    editable = col1.toggle("Mode éditable (grid)", value=False)
     show_export = col2.toggle("Activer export XLSX", value=True)
 
     try:
@@ -267,41 +259,41 @@ def render():
         st.error(f"Impossible d’ouvrir le fichier : {e}")
         st.stop()
 
-    # Ne garder que les feuilles visibles
     visible_sheets = [ws.title for ws in wb.worksheets if ws.sheet_state == "visible"]
     if not visible_sheets:
         st.warning("Aucune feuille visible dans ce classeur.")
         st.stop()
 
-    sheet = st.selectbox("Feuille source :", visible_sheets, index=visible_sheets.index(DEFAULT_SHEET) if DEFAULT_SHEET in visible_sheets else 0)
+    sheet = st.selectbox("Feuille source :", visible_sheets,
+                         index=visible_sheets.index(DEFAULT_SHEET) if DEFAULT_SHEET in visible_sheets else 0)
     ws = wb[sheet]
 
     if editable:
-        st.caption("Vue éditable (perte des fusions/formatages mais modifiable).")
+        st.caption("Vue éditable (valeurs uniquement).")
         df = _extract_dataframe(ws)
         edited = st.data_editor(df, use_container_width=True, height=650)
         if show_export:
             out = io.BytesIO()
-            with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+            # ✅ pas de xlsxwriter requis
+            with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 edited.to_excel(writer, sheet_name="Arbs", index=False)
             st.download_button("Exporter la vue éditée en XLSX", data=out.getvalue(),
-                               file_name="Arbs_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                               file_name="Arbs_export.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
-        st.caption("Rendu fidèle d’Excel (fusions, couleurs, bords).")
+        st.caption("Rendu fidèle d’Excel (fusions, styles, couleurs plus visibles).")
         html = _sheet_to_html(ws)
         st.markdown(html, unsafe_allow_html=True)
 
         if show_export:
-            # export de la zone visible telle quelle (valeurs uniquement)
             df = _extract_dataframe(ws)
             out = io.BytesIO()
-            with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+            with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 df.to_excel(writer, sheet_name="Arbs_visible", index=False)
             st.download_button("Exporter la zone visible en XLSX", data=out.getvalue(),
-                               file_name="Arbs_visible.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                               file_name="Arbs_visible.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-
-# Permet d’exécuter ce fichier seul (debug local)
 if __name__ == "__main__":
     import streamlit.web.bootstrap
     def main():
