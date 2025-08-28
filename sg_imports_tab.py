@@ -219,33 +219,30 @@ def _coerce_numeric(x):
 def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
     """
     Convertit la table brute (page 3) en lignes mensuelles.
-    Colonnes de sortie : Year, Month, <régions...>, Total
+    Sortie : Year, Month, <régions...>, Total
 
-    Hypothèses :
-    - une ligne d'en-tête contient "Year"
-    - l'année (20xx) peut apparaître sur une ligne seule
-    - un mois (January..December) peut apparaître sur une ou plusieurs lignes d'un même bloc
-    - certaines colonnes d'en-tête peuvent être vides/dupliquées ("Total …", "None", cellules fusionnées)
+    ⚠️ On n’agrège *que* les lignes qui contiennent explicitement un mois
+       (January..December). Les lignes sans mois (totaux annuels, entêtes
+       éclatées, etc.) sont ignorées pour éviter de gonfler le 1er mois.
     """
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # 0) Normalisation : tout en chaînes nettoyées
+    # Normalisation : tout en chaînes
     arr = df.copy()
     arr = arr.where(pd.notna(arr), "").astype(str)
     arr = arr.applymap(lambda s: s.strip())
 
-    # 1) Localiser la ligne d'en-tête (celle qui contient "Year")
+    # 1) Ligne d'entête (celle qui contient "Year")
     header_row_idx = None
     for i in range(min(len(arr), 20)):
-        row_lower = [c.lower() for c in arr.iloc[i].tolist()]
-        if "year" in row_lower:
+        if "year" in [c.lower() for c in arr.iloc[i].tolist()]:
             header_row_idx = i
             break
     if header_row_idx is None:
         return pd.DataFrame()
 
-    # 2) Construire les noms de colonnes en propageant le dernier nom non vide
+    # 2) Reconstruit des noms de colonnes en propageant le dernier non vide
     base_hdr = arr.iloc[header_row_idx].tolist()
     next_hdr = arr.iloc[header_row_idx + 1].tolist() if header_row_idx + 1 < len(arr) else [""] * arr.shape[1]
 
@@ -263,50 +260,43 @@ def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
                 last = name
             cols.append(last)
 
-    if all(c == "" for c in cols):
+    if all(not c for c in cols):
         return pd.DataFrame()
 
-    # 3) Balayage des lignes : agrégation par (Year, Month)
-    year_rx = re.compile(r"\b(20\d{2})\b")
+    # 3) Parcours des lignes : on agrège UNIQUEMENT si la ligne porte un mois
     current_year: Optional[str] = None
-    current_month: Optional[str] = None
     acc: dict[tuple[str, str], dict[str, float]] = {}
 
     for i in range(header_row_idx + 1, len(arr)):
         row = arr.iloc[i].tolist()
 
-        # Met à jour l'année (si vue sur cette ligne)
-        for c in row[:6]:
-            m = year_rx.search(c)
-            if m:
-                current_year = m.group(1)
-                break
+        # Met à jour l'année si présente sur la ligne
+        yr = _find_year_in_row(row)
+        if yr:
+            current_year = yr
 
-        # Met à jour le mois (si vu sur cette ligne)
-        for c in row[:6]:
-            if c in MONTHS_ORDER:
-                current_month = c
-                break
-
-        # Si on n'a pas encore Année + Mois on passe
-        if not current_year or not current_month:
+        # Détecte un mois sur la ligne (sinon on SKIP la ligne)
+        month = _detect_month_in_row(row)
+        if not month or not current_year:
             continue
 
-        key = (current_year, current_month)
-        if key not in acc:
-            acc[key] = {}
+        key = (current_year, month)
+        bucket = acc.setdefault(key, {})
 
-        # Agrège les valeurs régionales de la ligne
+        # Agrège les valeurs régionales de *cette* ligne seulement
         for j, val in enumerate(row):
             name = cols[j] if j < len(cols) else ""
-            if not _is_valid_region(name):     # <- ignore Year/Month/None/Total/Grand Total...
+            if not _is_valid_region(name):
                 continue
             v = _coerce_numeric(val)
             if v == 0:
                 continue
-            acc[key][name] = acc[key].get(name, 0.0) + v
+            bucket[name] = bucket.get(name, 0.0) + v
 
     # 4) DataFrame final
+    if not acc:
+        return pd.DataFrame()
+
     records = []
     for (yr, mo), d in acc.items():
         rec = {"Year": yr, "Month": mo}
@@ -317,18 +307,16 @@ def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return out
 
-    # 5) Nettoyage + Total (sans colonnes 'Total …')
+    # Nettoyage + Total
     out.columns = [str(c).strip().replace("\n", " ").replace("  ", " ") for c in out.columns]
     region_cols = [c for c in out.columns if _is_valid_region(c)]
     out["Total"] = out[region_cols].sum(axis=1)
 
-    # 6) Ordre & tri
+    # Ordre & tri
     out["Month"] = pd.Categorical(out["Month"], categories=MONTHS_ORDER, ordered=True)
     out = out.sort_values(["Year", "Month"]).reset_index(drop=True)
     out = out[["Year", "Month"] + region_cols + ["Total"]]
-
     return out
-
 
 
 
