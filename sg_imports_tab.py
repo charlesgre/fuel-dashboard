@@ -17,6 +17,7 @@ import streamlit as st
 from pathlib import Path            # NEW
 import re                           # NEW
 from datetime import datetime       # NEW (utilisé pour parser la date du nom)
+import os 
 
 TAB10 = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
          '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
@@ -53,38 +54,31 @@ def _extract_date_from_name(name: str) -> datetime | None:
     return None
 
 def _find_latest_pdf_path(base_dir: str | Path) -> Path | None:
-    """
-    Retourne le chemin du PDF le plus 'récent' dans base_dir.
-    - priorité à la 'data-date' trouvée dans le nom de fichier (max)
-    - sinon, mtime le plus récent
-    """
     p = Path(base_dir)
     if not p.exists() or not p.is_dir():
         return None
 
-    candidates = list(p.glob("*.pdf"))
+    # accepte .pdf et .PDF
+    candidates = list(p.glob("*.pdf")) + list(p.glob("*.PDF"))
     if not candidates:
         return None
 
-    # d'abord: essaye de classer par date trouvée dans le nom
-    with_dates = []
-    without_dates = []
+    with_dates, without_dates = [], []
     for f in candidates:
-        dt = _extract_date_from_name(f.name)
+        dt = _extract_date_from_name(f.name)  # ex. 25082025 dans le nom
         if dt:
             with_dates.append((dt, f))
         else:
             without_dates.append(f)
 
     if with_dates:
-        # tri par data-date décroissante
+        # tri par date de données (dans le nom) décroissante
         with_dates.sort(key=lambda x: x[0], reverse=True)
         return with_dates[0][1]
 
-    # fallback: par mtime décroissant
+    # sinon, on prend le fichier au mtime le plus récent
     candidates.sort(key=lambda f: f.stat().st_mtime, reverse=True)
     return candidates[0]
-
 
 def _clean_table(df: pd.DataFrame) -> pd.DataFrame:
     # Supprime les colonnes vides / dupliquées, normalise les entêtes
@@ -253,12 +247,20 @@ def _style_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
 def render_sg_imports_tab(default_dir: str | None = None):
     st.header("🇸🇬 Singapore Fuel Oil Imports (interactive)")
 
-    # 1) Chemin par défaut = Bureau\Fuel dashboard\Singapore hub tracking (Windows)
-    suggested = Path.home() / "Desktop" / "Fuel dashboard" / "Singapore hub tracking"
+    # 1) Default dir = repo_root / "Singapore hub tracking"  (fallback = Desktop)
+    repo_root = Path(os.getenv("FUEL_DASH_DATA_ROOT", Path(__file__).resolve().parent))
+    candidates = [
+        repo_root / "Singapore hub tracking",                                  # <- dossier du repo
+        Path.home() / "Desktop" / "Fuel dashboard" / "Singapore hub tracking", # fallback Windows
+    ]
+    # on prend le 1er qui existe
+    suggested = next((p for p in candidates if p.exists()), candidates[0])
+
     if default_dir:
         base_dir = Path(default_dir)
     else:
         base_dir = suggested
+
 
     col1, col2 = st.columns([2, 1])
     with col1:
