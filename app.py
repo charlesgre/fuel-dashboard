@@ -16,6 +16,33 @@ from generate_stocks_tab import generate_stocks_tab
 from fuel_vs_gas import generate_fuel_vs_gas_tab
 from technical_analysis_tab import render as render_technical
 from arbs_tab import render as render_arbs
+
+# ---- Secrets / .env helpers (safe when secrets.toml is absent) ----
+from typing import Optional
+
+# (optional) load .env if you use one locally
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+def _get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
+    # Prefer environment variable; only touch st.secrets if present
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        return st.secrets[key]  # raises if secrets.toml is missing
+    except Exception:
+        return default
+
+# Sync Streamlit secrets -> environment variables
+for k in ("PL_USERNAME", "PL_PASSWORD", "PL_API_KEY", "PL_API_HASH"):
+    v = _get_secret(k, None)
+    if v and not os.getenv(k):
+        os.environ[k] = v
+
 from key_locations import render_key_locations_export
 
 # ------------ Page config ------------
@@ -31,7 +58,7 @@ repo_root = Path(__file__).resolve().parent
 os.environ["FUEL_DASH_DATA_ROOT"] = str(repo_root)
 local_default = repo_root / "EA balances"
 
-EA_DIR = os.getenv("EA_PDF_DIR", st.secrets.get("EA_PDF_DIR", str(local_default)))
+EA_DIR = _get_secret("EA_PDF_DIR", str(local_default))
 if platform.system() != "Windows" and (EA_DIR.startswith("\\") or EA_DIR.startswith("//")):
     EA_DIR = str(local_default)
 os.environ["EA_PDF_DIR"] = EA_DIR
@@ -220,5 +247,20 @@ with tab10:
     render_arbs()
 
     # === TAB 11: KEY LOCATIONS EXPORT ===
+# === TAB 11: KEY LOCATIONS EXPORT ===
 with tab11:
+    def _mask(v: str):
+        if not v:
+            return "❌ missing"
+        return "✅ set (" + ("*" * max(0, len(v) - 4) + v[-4:]) + ")"
+
+
+    st.caption("Petro-Logistics credentials status:")
+    st.write({
+        "PL_USERNAME": _mask(os.getenv("PL_USERNAME", "")),
+        "PL_PASSWORD": _mask(os.getenv("PL_PASSWORD", "")),
+        "PL_API_KEY":  _mask(os.getenv("PL_API_KEY", "")),
+        "PL_API_HASH": _mask(os.getenv("PL_API_HASH", "")),
+    })
+
     render_key_locations_export()
