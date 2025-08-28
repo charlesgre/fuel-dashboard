@@ -186,43 +186,55 @@ def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.
     current_year: Optional[str] = None
     current_month: Optional[str] = None
     acc: dict[tuple[str, str], dict[str, float]] = {}
-
-    # ⚠️ 3) On SAUTE toutes les lignes d'entête scannées
+    # --- 3) Scan data rows (AFTER the header block)
     start_i = header_row_idx + scan_rows
+    year_rx = re.compile(r"(20\d{2})")
+
+    current_year: Optional[str] = None
+    current_month: Optional[str] = None
+    acc: dict[tuple[str, str], dict[str, float]] = {}
+
     for i in range(start_i, len(arr)):
         row = arr.iloc[i].tolist()
 
-        # ignorer toute ligne "total" d'en-tête ou de sous-total
-        head_txt = " ".join(str(x).lower() for x in row[:3])
-        if "total" in head_txt:
+        # 0) If the row looks like any kind of total line, skip it entirely
+        row_txt_all = " ".join(str(x).lower() for x in row)
+        if "total" in row_txt_all:
+            # prevents picking the per-year summary and the final grand total
             continue
 
-        # met à jour l'année si on la voit dans les 6 premières cellules
+        # 1) Detect year and month on THIS row
         yr = None
         for c in row[:6]:
             m = year_rx.search(str(c))
             if m:
                 yr = m.group(1)
                 break
+
+        mo = _detect_month_in_row(row[:3])  # only look in the first few cells
+
+        # 2) If we saw a year but NO month on this row, this is a "year header/summary".
+        #    Start a new year block and drop any carried-over month.
+        if yr and not mo:
+            current_year = yr
+            current_month = None
+            continue  # don't aggregate this line
+
+        # 3) Normal month update
+        if mo:
+            current_month = mo
         if yr:
             current_year = yr
 
-        # détecte le mois uniquement dans les 1–3 premières colonnes
-        m = _detect_month_in_row(row[:3])
-        if m:
-            current_month = m
-
-        # on n'agrège que si on a un mois; l'année peut venir du tableau ou du fallback
-        if not current_month:
-            continue
+        # 4) Only aggregate once we have both pieces
         key_year = current_year or fallback_year
-        if not key_year:
+        if not key_year or not current_month:
             continue
 
         key = (key_year, current_month)
         bucket = acc.setdefault(key, {})
 
-        # agrège les colonnes correspondant à des régions
+        # 5) Aggregate values for REAL region columns only
         for j, val in enumerate(row):
             lab = _col_label_or_empty(j)
             if not lab:
@@ -232,8 +244,6 @@ def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.
                 continue
             bucket[lab] = bucket.get(lab, 0.0) + v
 
-    if not acc:
-        return pd.DataFrame()
 
     # 4) DataFrame final
     out = pd.DataFrame(
