@@ -290,9 +290,9 @@ with tab10:
 
 # === TAB 11: SG imports ===
 with tab11:
-    # Option: si tu veux un PDF par défaut sans upload, mets un chemin:
-    DEFAULT_SG_PDF = ""  # ex: "/path/to/Fuel Oil Flow to SG UPDATED - 25082025 (1).pdf"
-    render_sg_imports_tab(DEFAULT_SG_PDF)
+    # Dossier par défaut (Windows)
+    DEFAULT_SG_DIR = str(Path.home() / "Desktop" / "Fuel dashboard" / "Singapore hub tracking")
+    render_sg_imports_tab(default_dir=DEFAULT_SG_DIR)
 
 # === TAB 12: KEY LOCATIONS EXPORT ===
 with tab12:
