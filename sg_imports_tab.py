@@ -216,106 +216,94 @@ def _coerce_numeric(x):
     except Exception:
         return 0.0
 
-def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
+def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.DataFrame:
     """
     Convertit la table brute (page 3) en lignes mensuelles robustes.
     Sortie : Year, Month, <régions...>, Total
+    - Détection d'entêtes sur plusieurs lignes
+    - Ignore colonnes 'Total'
+    - Persiste le mois courant sur plusieurs lignes
+    - Année de secours depuis le nom de fichier si absente
     """
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # --- Normalisation (tout en chaînes nettoyées)
+    # Normalisation
     arr = df.copy()
     arr = arr.where(pd.notna(arr), "").astype(str)
     arr = arr.applymap(lambda s: s.strip())
 
-    # --- 1) Trouver la ligne d'entête (celle qui contient "Year")
+    # 1) Localiser la ligne qui contient "Year" (indice des entêtes)
     header_row_idx = None
-    for i in range(min(len(arr), 20)):
+    for i in range(min(len(arr), 30)):
         if "year" in [c.lower() for c in arr.iloc[i].tolist()]:
             header_row_idx = i
             break
     if header_row_idx is None:
-        return pd.DataFrame()
+        # pas de ligne "Year" -> on essaie quand même avec les 6 1ères lignes
+        header_row_idx = 0
 
-    # --- 2) Reconstruire les noms de colonnes (propage le dernier non vide)
-    base_hdr = arr.iloc[header_row_idx].tolist()
-    next_hdr = arr.iloc[header_row_idx + 1].tolist() if header_row_idx + 1 < len(arr) else [""] * arr.shape[1]
-    cols, last = [], ""
-    for j in range(arr.shape[1]):
-        cell = base_hdr[j] if j < len(base_hdr) else ""
-        fallback = next_hdr[j] if j < len(next_hdr) else ""
-        name = cell if cell not in ("", "None") else fallback
-        name = (name or "").strip()
-        if name.lower() == "year":
-            cols.append("Year")
-            last = ""
-        else:
-            if name:
-                last = name
-            cols.append(last)
-    if all(not c for c in cols):
-        return pd.DataFrame()
+    # 2) Déduire le libellé de chaque colonne en scannant plusieurs lignes d'entête
+    #    (celle qui contient 'Year' + quelques suivantes)
+    scan_blk = arr.iloc[header_row_idx: header_row_idx + 8].copy()
+    col_label = _scan_header_labels(scan_blk, header_rows=len(scan_blk))
 
-    # --- helpers locaux
-    def _row_has_total(cells: list[str]) -> bool:
-        txt = " ".join(str(x) for x in cells).lower()
-        return "total" in txt  # "total", "grand total", "total …", etc.
+    def _col_is_total(j: int) -> bool:
+        lab = col_label.get(j, "")
+        return "total" in lab.lower()
 
-    def _month_from_any_cell(cells: list[str]) -> str | None:
-        # détecte un mois dans n'importe quelle cellule
-        for c in cells:
-            n = re.sub(r"[^a-z]", "", str(c).lower())
-            if not n or "total" in n:
-                continue
-            for pref, full in MONTH_PREFIX.items():
-                if n.startswith(pref):
-                    return full
-        return None
+    def _col_label_or_empty(j: int) -> str:
+        lab = col_label.get(j, "").strip()
+        return lab if _is_valid_region(lab) and not _col_is_total(j) else ""
 
-    # --- 3) Balayage des lignes avec état (year, month)
+    # 3) Balayage des lignes pour agréger par (Year, Month)
     current_year: Optional[str] = None
     current_month: Optional[str] = None
     acc: dict[tuple[str, str], dict[str, float]] = {}
 
+    # Année de secours si on ne la trouve jamais dans le tableau
+    guessed_year = None
+
     for i in range(header_row_idx + 1, len(arr)):
         row = arr.iloc[i].tolist()
 
-        # met à jour l'année si on la voit
-        yr = _find_year_in_row(row[:6])  # cherche 20xx dans les 6 premières cellules
+        # Met à jour l'année si on la voit
+        yr = _find_year_in_row(row[:8])
         if yr:
             current_year = yr
+            guessed_year = yr
 
-        # détecte un nouveau mois si présent
-        m = _month_from_any_cell(row)
+        # Détecte le mois si présent quelque part sur la ligne
+        m = _detect_month_in_row(row)
         if m:
             current_month = m
 
-        # on n'agrège que si on a bien un couple (Year, Month)
-        if not current_year or not current_month:
+        # Si on n'a jamais vu d'année, on utilisera 'fallback_year' plus tard
+        if not current_month:
             continue
 
-        # ignore les lignes "Total"
-        if _row_has_total(row[:6]):
+        key_year = current_year or fallback_year or guessed_year
+        if not key_year:
+            # on ne sait toujours pas quelle année, on attend
             continue
 
-        key = (current_year, current_month)
+        key = (key_year, current_month)
         bucket = acc.setdefault(key, {})
 
-        # agrège les valeurs régionales
+        # Agrège toutes les colonnes qui sont de vraies régions (pas 'Total', pas vides)
         for j, val in enumerate(row):
-            name = cols[j] if j < len(cols) else ""
-            if not _is_valid_region(name):
+            lab = _col_label_or_empty(j)
+            if not lab:
                 continue
             v = _coerce_numeric(val)
             if v == 0:
                 continue
-            bucket[name] = bucket.get(name, 0.0) + v
+            bucket[lab] = bucket.get(lab, 0.0) + v
 
-    # --- 4) DataFrame final
     if not acc:
         return pd.DataFrame()
 
+    # 4) DataFrame final
     records = []
     for (yr, mo), d in acc.items():
         rec = {"Year": yr, "Month": mo}
@@ -326,16 +314,17 @@ def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return out
 
-    # Noms propres + Total recalculé uniquement sur vraies régions
+    # Nettoyage + Total (uniquement sur vraies régions)
     out.columns = [str(c).strip().replace("\n", " ").replace("  ", " ") for c in out.columns]
     region_cols = [c for c in out.columns if _is_valid_region(c)]
     out["Total"] = out[region_cols].sum(axis=1)
 
-    # Ordre & tri
+    # Tri
     out["Month"] = pd.Categorical(out["Month"], categories=MONTHS_ORDER, ordered=True)
     out = out.sort_values(["Year", "Month"]).reset_index(drop=True)
     out = out[["Year", "Month"] + region_cols + ["Total"]]
     return out
+
 
 
 
@@ -509,6 +498,17 @@ def render_sg_imports_tab(default_dir: str | None = None):
 
     st.caption(f"PDF utilisé: **{chosen_path}**")
 
+    # --- Année de secours depuis le nom de fichier (si on ne la trouve pas dans le tableau)
+    fallback_year = None
+    try:
+        fname = Path(chosen_path).name if chosen_path else ""
+        dt = _extract_date_from_name(fname)
+        if dt:
+            fallback_year = str(dt.year)  # ex: "2024"
+    except Exception:
+        pass
+    
+
     # ---- Extraction des tableaux page 3
     try:
         hsfo_raw, lsfo_raw = _extract_tables_from_pdf(pdf_bytes)
@@ -519,8 +519,8 @@ def render_sg_imports_tab(default_dir: str | None = None):
         return
 
     # Nettoyage / mise en forme (mensuel par régions)
-    hsfo_monthly = _table_to_monthly(hsfo_raw)
-    lsfo_monthly = _table_to_monthly(lsfo_raw)
+    hsfo_monthly = _table_to_monthly(hsfo_raw, fallback_year=fallback_year)
+    lsfo_monthly = _table_to_monthly(lsfo_raw, fallback_year=fallback_year)
 
     if hsfo_monthly.empty:
         st.warning("Aucune ligne mensuelle HSFO n'a été détectée dans la page 3. "
