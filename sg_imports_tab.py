@@ -218,22 +218,18 @@ def _coerce_numeric(x):
 
 def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convertit la table brute (page 3) en lignes mensuelles.
+    Convertit la table brute (page 3) en lignes mensuelles robustes.
     Sortie : Year, Month, <régions...>, Total
-
-    ⚠️ On n’agrège *que* les lignes qui contiennent explicitement un mois
-       (January..December). Les lignes sans mois (totaux annuels, entêtes
-       éclatées, etc.) sont ignorées pour éviter de gonfler le 1er mois.
     """
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # Normalisation : tout en chaînes
+    # --- Normalisation (tout en chaînes nettoyées)
     arr = df.copy()
     arr = arr.where(pd.notna(arr), "").astype(str)
     arr = arr.applymap(lambda s: s.strip())
 
-    # 1) Ligne d'entête (celle qui contient "Year")
+    # --- 1) Trouver la ligne d'entête (celle qui contient "Year")
     header_row_idx = None
     for i in range(min(len(arr), 20)):
         if "year" in [c.lower() for c in arr.iloc[i].tolist()]:
@@ -242,10 +238,9 @@ def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
     if header_row_idx is None:
         return pd.DataFrame()
 
-    # 2) Reconstruit des noms de colonnes en propageant le dernier non vide
+    # --- 2) Reconstruire les noms de colonnes (propage le dernier non vide)
     base_hdr = arr.iloc[header_row_idx].tolist()
     next_hdr = arr.iloc[header_row_idx + 1].tolist() if header_row_idx + 1 < len(arr) else [""] * arr.shape[1]
-
     cols, last = [], ""
     for j in range(arr.shape[1]):
         cell = base_hdr[j] if j < len(base_hdr) else ""
@@ -259,31 +254,55 @@ def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
             if name:
                 last = name
             cols.append(last)
-
     if all(not c for c in cols):
         return pd.DataFrame()
 
-    # 3) Parcours des lignes : on agrège UNIQUEMENT si la ligne porte un mois
+    # --- helpers locaux
+    def _row_has_total(cells: list[str]) -> bool:
+        txt = " ".join(str(x) for x in cells).lower()
+        return "total" in txt  # "total", "grand total", "total …", etc.
+
+    def _month_from_any_cell(cells: list[str]) -> str | None:
+        # détecte un mois dans n'importe quelle cellule
+        for c in cells:
+            n = re.sub(r"[^a-z]", "", str(c).lower())
+            if not n or "total" in n:
+                continue
+            for pref, full in MONTH_PREFIX.items():
+                if n.startswith(pref):
+                    return full
+        return None
+
+    # --- 3) Balayage des lignes avec état (year, month)
     current_year: Optional[str] = None
+    current_month: Optional[str] = None
     acc: dict[tuple[str, str], dict[str, float]] = {}
 
     for i in range(header_row_idx + 1, len(arr)):
         row = arr.iloc[i].tolist()
 
-        # Met à jour l'année si présente sur la ligne
-        yr = _find_year_in_row(row)
+        # met à jour l'année si on la voit
+        yr = _find_year_in_row(row[:6])  # cherche 20xx dans les 6 premières cellules
         if yr:
             current_year = yr
 
-        # Détecte un mois sur la ligne (sinon on SKIP la ligne)
-        month = _detect_month_in_row(row)
-        if not month or not current_year:
+        # détecte un nouveau mois si présent
+        m = _month_from_any_cell(row)
+        if m:
+            current_month = m
+
+        # on n'agrège que si on a bien un couple (Year, Month)
+        if not current_year or not current_month:
             continue
 
-        key = (current_year, month)
+        # ignore les lignes "Total"
+        if _row_has_total(row[:6]):
+            continue
+
+        key = (current_year, current_month)
         bucket = acc.setdefault(key, {})
 
-        # Agrège les valeurs régionales de *cette* ligne seulement
+        # agrège les valeurs régionales
         for j, val in enumerate(row):
             name = cols[j] if j < len(cols) else ""
             if not _is_valid_region(name):
@@ -293,7 +312,7 @@ def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
                 continue
             bucket[name] = bucket.get(name, 0.0) + v
 
-    # 4) DataFrame final
+    # --- 4) DataFrame final
     if not acc:
         return pd.DataFrame()
 
@@ -307,7 +326,7 @@ def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return out
 
-    # Nettoyage + Total
+    # Noms propres + Total recalculé uniquement sur vraies régions
     out.columns = [str(c).strip().replace("\n", " ").replace("  ", " ") for c in out.columns]
     region_cols = [c for c in out.columns if _is_valid_region(c)]
     out["Total"] = out[region_cols].sum(axis=1)
