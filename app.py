@@ -290,9 +290,7 @@ with tab10:
 
 # === TAB 11: SG imports ===
 with tab11:
-    # Dossier par défaut (Windows)
-    DEFAULT_SG_DIR = str(Path.home() / "Desktop" / "Fuel dashboard" / "Singapore hub tracking")
-    render_sg_imports_tab(default_dir=DEFAULT_SG_DIR)
+    render_sg_imports_tab()   # ne pas passer default_dir
 
 # === TAB 12: KEY LOCATIONS EXPORT ===
 with tab12:
