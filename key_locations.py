@@ -210,7 +210,7 @@ def yoy_narrative(df_yoy: pd.DataFrame, target_year: int, target_month: int):
             tail += f" Largest decline: {dec['Country']} ({dec['YoY Change (%)']:.1f}%)."
     return head + tail
 
-def style_yoy_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+def style_yoy_table(df: pd.DataFrame):
     def colorize(v):
         try:
             if v == "N/A":
