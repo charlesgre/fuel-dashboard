@@ -84,9 +84,9 @@ def _clean_table(df: pd.DataFrame) -> pd.DataFrame:
     # Supprime les colonnes vides / dupliquées, normalise les entêtes
     df = df.copy()
 
-    # 1) Enlève colonnes totalement vides (NaN ou chaînes vides après trim)
-    stripped = df.astype(str).applymap(lambda s: s.strip() if pd.notna(s) else s)
-    non_empty_cols = ~(df.isna() | (stripped == "")).all(axis=0)
+    # 1) Enlève les colonnes totalement vides (NaN ou chaînes vides après trim)
+    stripped0 = df.astype(str).applymap(lambda s: s.strip() if pd.notna(s) else s)
+    non_empty_cols = ~(df.isna() | (stripped0 == "")).all(axis=0)
     df = df.loc[:, non_empty_cols]
 
     # 2) La 1ère ligne contient souvent l'entête; on la promeut si "Year" dedans
@@ -103,20 +103,25 @@ def _clean_table(df: pd.DataFrame) -> pd.DataFrame:
         # sinon on forge des noms simples
         df.columns = [f"col_{i}" for i in range(1, len(df.columns) + 1)]
 
+    # 2bis) ⚠️ Supprime les colonnes portant le même nom (on garde la 1re)
+    df = df.loc[:, ~pd.Index(df.columns).duplicated(keep="first")]
+
     # 3) Trim final des cellules
     df = df.applymap(lambda x: str(x).strip() if pd.notna(x) else x)
     return df
 
 
+
 def _detect_month_rows(df: pd.DataFrame) -> pd.DataFrame:
-    # Conserve lignes dont 1ère colonne ∈ {year, month, total}
-    first_col = df.columns[0]
+    # On lit la 1re colonne par POSITION pour éviter le problème de doublons
+    s = df.iloc[:, 0].astype(str).str.strip()
     keep = []
-    for i, v in enumerate(df[first_col].astype(str).str.strip()):
+    for i, v in enumerate(s):
         vl = v.lower()
-        if vl in {"2024","2025","total"} or v in MONTHS_ORDER:
+        if vl in {"2024", "2025", "total"} or v in MONTHS_ORDER:
             keep.append(i)
     return df.iloc[keep].reset_index(drop=True)
+
 
 def _coerce_numeric(x):
     try:
@@ -129,41 +134,35 @@ def _coerce_numeric(x):
         return 0.0
 
 def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transforme le tableau 'HSFO/LSFO imports by Load Region' en dataframe:
-    index: Month (January..December), colonnes: regions, plus 'Year' & 'Total'
-    """
     df = _clean_table(df)
     df = _detect_month_rows(df)
     if df.empty:
         return df
 
-    # identifie la première colonne (Year/Month)
-    first_col = df.columns[0]
-    # Si la première ligne est '2024' ou '2025', on garde des blocs Année + mois suivants
     records = []
     current_year: Optional[str] = None
 
     for _, row in df.iterrows():
-        label = str(row[first_col]).strip()
-        if label in {"2024","2025"}:
+        # 1re cellule de la ligne (par position)
+        label = str(row.iloc[0]).strip()
+        if label in {"2024", "2025"}:
             current_year = label
             continue
         if label.lower() == "total":
-            # total global: on peut l'ignorer (on recalcule nous-mêmes)
             continue
         if label not in MONTHS_ORDER:
-            # ligne non reconnue -> skip
             continue
 
         rec = {"Year": current_year, "Month": label}
-        # le reste des colonnes = régions
-        for col in df.columns[1:]:
-            val = _coerce_numeric(row[col])
+        # le reste des colonnes = régions (on lit par position pour être robuste)
+        for j, col in enumerate(df.columns[1:], start=1):
+            val = _coerce_numeric(row.iloc[j])
             rec[col] = val
         records.append(rec)
 
     out = pd.DataFrame(records)
+    ...
+
     # Nettoie les noms de colonnes (régions)
     out.columns = [c.strip().replace("\n"," ").replace("  "," ") for c in out.columns]
     # Ajoute Total calculé
