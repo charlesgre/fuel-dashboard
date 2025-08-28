@@ -30,7 +30,7 @@ API_URL = "https://secure.petro-logistics.com/api/v3/movementsdata"
 # ⚠️ Remplace <QUERY_IRAN>/<QUERY_IRAQ> par les bons query_name Petro-Logistics
 QUERY_BY_LOCATION = {
     "Global Russian exports": "FSU_FO_2023_P31",
-    "Iranian exports": "<Iran_FO_2023_P5>",
+    "Iranian exports": "Iran_FO_2023_P5",
     "Iraqi exports": "Iraq_FO_2023_P5",
 }
 
