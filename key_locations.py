@@ -15,6 +15,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
+import plotly.graph_objects as go  # NEW
+
+# mêmes couleurs que Matplotlib tab10 (bleu, orange, vert, rouge, …)
+TAB10 = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+         '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+
 # --- (Optionnel) charger un .env ---
 try:
     from dotenv import load_dotenv
@@ -204,7 +210,21 @@ def yoy_narrative(df_yoy: pd.DataFrame, target_year: int, target_month: int):
             tail += f" Largest decline: {dec['Country']} ({dec['YoY Change (%)']:.1f}%)."
     return head + tail
 
-def fig_monthly(df: pd.DataFrame, countries: list, title: str):
+def style_yoy_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    def colorize(v):
+        try:
+            if v == "N/A":
+                return ""
+            v = float(v)
+            return "color: green;" if v > 0 else ("color: red;" if v < 0 else "")
+        except Exception:
+            return ""
+    # formatage des colonnes numériques
+    fmt = {df.columns[1]: "{:.2f}", df.columns[2]: "{:.2f}"}
+    styler = df.style.format(fmt)
+    return styler.applymap(colorize, subset=["YoY Change (%)"])
+
+def fig_monthly_matplotlib(df: pd.DataFrame, countries: list, title: str):
     fig = plt.figure(figsize=(12, 6))
     ax = plt.gca()
 
@@ -213,19 +233,16 @@ def fig_monthly(df: pd.DataFrame, countries: list, title: str):
         return fig
 
     plot_cols, labels, missing = _resolve_in_df(df.columns, countries)
-
     if not plot_cols:
         ax.text(0.5, 0.5, "No data for selected countries", ha="center", va="center")
-        try:
-            st.warning("No matching countries found for your selection "
-                       "(ex: U.S.A. → United States, UAE → United Arab Emirates).")
-        except Exception:
-            pass
         return fig
 
     df_plot = df[plot_cols].copy()
     df_plot.columns = labels
-    df_plot.plot(kind="bar", stacked=True, ax=ax)
+
+    # même palette que Plotly (tab10)
+    colors = [TAB10[i % len(TAB10)] for i in range(len(labels))]
+    df_plot.plot(kind="bar", stacked=True, ax=ax, color=colors)
 
     if "3M Avg" in df.columns:
         ax.plot(df["3M Avg"], linestyle="--", label="3-Month Trend")
@@ -239,14 +256,58 @@ def fig_monthly(df: pd.DataFrame, countries: list, title: str):
     ax.grid(True, axis="y")
     ax.legend()
     plt.tight_layout()
-
-    if missing:
-        try:
-            st.info("Not found in dataset: " + ", ".join(missing))
-        except Exception:
-            pass
-
     return fig
+
+
+def fig_monthly_plotly(df: pd.DataFrame, countries: list, title: str) -> go.Figure:
+    fig = go.Figure()
+
+    if df.empty:
+        fig.add_annotation(text="No data", showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
+        return fig
+
+    plot_cols, labels, missing = _resolve_in_df(df.columns, countries)
+    if not plot_cols:
+        fig.add_annotation(text="No data for selected countries",
+                           showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
+        return fig
+
+    df_plot = df[plot_cols].copy()
+    df_plot.columns = labels
+    x = df_plot.index.astype(str)
+
+    # mêmes couleurs que Matplotlib (tab10) dans l’ordre des labels
+    for i, lbl in enumerate(labels):
+        fig.add_trace(go.Bar(
+            x=x, y=df_plot[lbl],
+            name=lbl,
+            marker_color=TAB10[i % len(TAB10)],
+            hovertemplate=f"<b>{lbl}</b><br>%{{x}}<br>%{{y:.1f}} kt<extra></extra>",
+        ))
+
+    # 3M Avg (pointillés) & 12M Avg (plein)
+    if "3M Avg" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=x, y=df["3M Avg"], name="3-Month Trend",
+            mode="lines", line=dict(dash="dash")
+        ))
+    if "12M Avg" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=x, y=df["12M Avg"], name="12-Month Avg",
+            mode="lines"
+        ))
+
+    fig.update_layout(
+        title=title,
+        barmode="stack",
+        xaxis_title="Month",
+        yaxis_title="Kilotonnes (kt)",
+        hovermode="x unified",
+        legend=dict(orientation="v"),
+        margin=dict(l=10, r=10, t=60, b=10),
+    )
+    return fig
+
 
 
 def df_to_png_table(df: pd.DataFrame, title: str = None, scale=(1.2,1.4)):
@@ -337,8 +398,14 @@ def render_key_locations_export():
     # === Affichage ===
     st.subheader("Monthly exports")
     title = f"Monthly Fuel Oil Exports by Country — {location} (kt) — Since Jan 2024"
-    fig1 = fig_monthly(df_month, countries, title)
-    st.pyplot(fig1, clear_figure=True)
+
+    # ➜ Graphe interactif (Plotly)
+    fig_inter = fig_monthly_plotly(df_month, countries, title)
+    st.plotly_chart(fig_inter, use_container_width=True)
+
+    # ➜ Graphe statique (Matplotlib) pour l’export PNG
+    fig_static = fig_monthly_matplotlib(df_month, countries, title)
+
 
     st.subheader("Discharge table")
     st.dataframe(df_dis, use_container_width=True)
@@ -350,7 +417,8 @@ def render_key_locations_export():
     )
 
     st.subheader(f"YoY — {datetime(target_year, target_month,1):%B} {target_year} vs {target_year-1}")
-    st.dataframe(df_yoy, use_container_width=True)
+    st.dataframe(style_yoy_table(df_yoy), use_container_width=True)
+
     st.download_button(
         "Download YoY CSV",
         df_yoy.to_csv(index=False).encode(),
@@ -361,7 +429,7 @@ def render_key_locations_export():
 
     # Exports PNG (optionnels)
     st.markdown("**PNG exports (optionnels)**")
-    png_monthly = make_download_png(fig1)
+    png_monthly = make_download_png(fig_static)
     b64_download_link(png_monthly, f"monthly_{location}_{target_year}-{target_month:02}.png",
                       "Download monthly chart (PNG)")
 
