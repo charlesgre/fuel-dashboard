@@ -134,48 +134,107 @@ def _coerce_numeric(x):
         return 0.0
 
 def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
-    df = _clean_table(df)
-    df = _detect_month_rows(df)
-    if df.empty:
-        return df
+    """
+    Convertit la table brute (page 3) en lignes mensuelles:
+    colonnes = Year, Month, <régions...>, Total
+    Fonction robuste aux entêtes/colonnes dupliquées et aux cellules vides.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
 
+    # Tout en chaînes nettoyées
+    arr = df.copy()
+    arr = arr.where(pd.notna(arr), "").astype(str)
+    arr = arr.applymap(lambda s: s.strip())
+
+    # 1) Trouver la ligne d'entête (celle qui contient 'Year')
+    header_row_idx = None
+    for i in range(len(arr)):
+        row_lower = [c.lower() for c in arr.iloc[i].tolist()]
+        if "year" in row_lower:
+            header_row_idx = i
+            break
+    if header_row_idx is None:
+        return pd.DataFrame()
+
+    # 2) Reconstruire les noms de colonnes
+    base_hdr = arr.iloc[header_row_idx].tolist()
+    next_hdr = arr.iloc[header_row_idx + 1].tolist() if header_row_idx + 1 < len(arr) else [""] * arr.shape[1]
+
+    cols = []
+    last = ""
+    for j, cell in enumerate(base_hdr):
+        name = cell if cell not in ("", "None") else next_hdr[j]
+        name = (name or "").strip()
+        if name.lower() == "year":
+            cols.append("Year")
+            last = ""
+        else:
+            # propage le dernier nom non vide pour passer les cellules vides dues aux fusions
+            if name:
+                last = name
+            cols.append(last)
+
+    # Si tout est vide (cas extrême), on abandonne
+    if all(c == "" for c in cols):
+        return pd.DataFrame()
+
+    # 3) Parcours des lignes de données
     records = []
     current_year: Optional[str] = None
+    year_regex = re.compile(r"(20\d{2})")  # attrape 2024, 2025, etc.
 
-    for _, row in df.iterrows():
-        # 1re cellule de la ligne (par position)
-        label = str(row.iloc[0]).strip()
-        if label in {"2024", "2025"}:
-            current_year = label
-            continue
-        if label.lower() == "total":
-            continue
-        if label not in MONTHS_ORDER:
+    for i in range(header_row_idx + 1, len(arr)):
+        row = arr.iloc[i].tolist()
+
+        # Annee: si une cellule (parmi les 5 premières) contient un "20xx"
+        yr = None
+        for c in row[:5]:
+            m = year_regex.search(str(c))
+            if m:
+                yr = m.group(1)
+                break
+        if yr:
+            current_year = yr
+            continue  # ligne "Year" seule -> on passe à la suivante
+
+        # Mois: cherche un nom de mois dans les 6 premières cellules
+        month = None
+        for c in row[:6]:
+            if c in MONTHS_ORDER:
+                month = c
+                break
+        if not month:
             continue
 
-        rec = {"Year": current_year, "Month": label}
-        # le reste des colonnes = régions (on lit par position pour être robuste)
-        for j, col in enumerate(df.columns[1:], start=1):
-            val = _coerce_numeric(row.iloc[j])
-            rec[col] = val
+        # 4) Construire l'enregistrement: somme par intitulé (les colonnes dupliquées sont agrégées)
+        rec = {"Year": current_year, "Month": month}
+        for j, val in enumerate(row):
+            name = cols[j] if j < len(cols) else ""
+            if name in ("", "Year"):  # on ignore colonnes non nommées et la colonne Year
+                continue
+            v = _coerce_numeric(val)
+            if v == 0:
+                continue
+            rec[name] = rec.get(name, 0.0) + v  # agrège si même entête répété
+
         records.append(rec)
 
     out = pd.DataFrame(records)
-
-    # ➜ si rien n'a été reconnu, on renvoie tel quel (DataFrame vide)
     if out.empty:
         return out
 
-    # Nettoie les noms de colonnes (régions)
-    out.columns = [c.strip().replace("\n"," ").replace("  "," ") for c in out.columns]
-    # Ajoute Total calculé
-    region_cols = [c for c in out.columns if c not in ("Year","Month")]
-    if region_cols:
-        out["Total"] = out[region_cols].sum(axis=1)
-    # Tri par année puis mois
+    # Nettoyage des noms + Total recalculé
+    out.columns = [str(c).strip().replace("\n", " ").replace("  ", " ") for c in out.columns]
+    region_cols = [c for c in out.columns if c not in ("Year", "Month", "Total")]
+    out["Total"] = out[region_cols].sum(axis=1)
+
+    # Tri Year, Month
     out["Month"] = pd.Categorical(out["Month"], categories=MONTHS_ORDER, ordered=True)
-    out = out.sort_values(["Year","Month"]).reset_index(drop=True)
+    out = out.sort_values(["Year", "Month"]).reset_index(drop=True)
+
     return out
+
 
 
 def _extract_tables_from_pdf(pdf_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
