@@ -128,18 +128,19 @@ def compute_monthly(root: ET.Element, countries: list, since=datetime(2024,1,1))
     return df
 
 def compute_discharge_table(root: ET.Element, target_year: int, target_month: int):
+    # ⚠️ désormais on filtre sur LOAD (exports)
     prefix = f"{target_year}-{target_month:02}"
     rows = []
     for m in root.findall(".//movement"):
-        ddate = m.findtext("discharge_port_date")
-        if ddate and ddate.startswith(prefix):
+        ldate = m.findtext("load_port_date")          # <--- CHANGE
+        if ldate and ldate.startswith(prefix):        # <--- CHANGE
             rows.append([
                 m.findtext("tanker_name"),
                 m.findtext("load_port_date"),
                 m.findtext("load_port"),
                 m.findtext("load_country"),
                 float(m.findtext("qty_tonnes") or 0),
-                ddate,
+                m.findtext("discharge_port_date"),
                 m.findtext("discharge_port"),
                 m.findtext("discharge_country"),
                 m.findtext("cargo_id")
@@ -147,6 +148,7 @@ def compute_discharge_table(root: ET.Element, target_year: int, target_month: in
     cols = ["Tanker","Load Date","Load Port","Load Country","Qty Tonnes",
             "Discharge Date","Discharge Port","Discharge Country","Cargo ID"]
     return pd.DataFrame(rows, columns=cols)
+
 
 def compute_yoy(root: ET.Element, countries: list, target_year: int, target_month: int):
     yoy_data = defaultdict(lambda: {"prev": 0.0, "curr": 0.0})
@@ -407,7 +409,7 @@ def render_key_locations_export():
     fig_static = fig_monthly_matplotlib(df_month, countries, title)
 
 
-    st.subheader("Discharge table")
+    st.subheader("Ship tracking — exports by load month")
     st.dataframe(df_dis, use_container_width=True)
     st.download_button(
         "Download discharge CSV",
