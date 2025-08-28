@@ -16,6 +16,7 @@ from generate_stocks_tab import generate_stocks_tab
 from fuel_vs_gas import generate_fuel_vs_gas_tab
 from technical_analysis_tab import render as render_technical
 from arbs_tab import render as render_arbs
+from sg_imports_tab import render_sg_imports_tab
 
 # ---- Secrets / .env helpers (robust even if secrets.toml isn't auto-loaded) ----
 from typing import Optional
@@ -117,11 +118,12 @@ def get_ea_data_cached(_parser_version: str):
     return _load_ea_data()
 
 # ------------ Tabs ------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
     "📊 Prices", "⛽ Bunker Diff", "CDD/Temperatures",
     "Balances (FGE / EA)", "📈 Forward Curves", "Platts Window",
     "📦 Fuel Stocks", "Gas vs Fuel", "🔍 Technical Analysis", "📑 Arbs",
-    "🌍 Key locations export"  # 👈 nouvel onglet
+    "🇸🇬 SG hub tracking",  # 👈 NOUVEL ONGLET
+    "🌍 Key locations export"
 ])
 
 # === TAB 1: PRICES ===
@@ -286,9 +288,14 @@ with tab9:
 with tab10:
     render_arbs()
 
-    # === TAB 11: KEY LOCATIONS EXPORT ===
-# === TAB 11: KEY LOCATIONS EXPORT ===
+# === TAB 11: SG imports ===
 with tab11:
+    # Option: si tu veux un PDF par défaut sans upload, mets un chemin:
+    DEFAULT_SG_PDF = ""  # ex: "/path/to/Fuel Oil Flow to SG UPDATED - 25082025 (1).pdf"
+    render_sg_imports_tab(DEFAULT_SG_PDF)
+
+# === TAB 12: KEY LOCATIONS EXPORT ===
+with tab12:
     def _mask(v: str):
         if not v:
             return "❌ missing"
