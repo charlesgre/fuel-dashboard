@@ -23,11 +23,11 @@ except Exception:
     pass
 
 # === Variables d'environnement à définir ===
-API_USERNAME = os.getenv("cgregoire_http_ARo30SE9a8nb")       # ex: "cgregoire_http_ARo30SE9a8nb"
-API_PASSWORD = os.getenv("6JE22K23hIUZIaJ26IFO2senVxF41xP")       # ex: "X6JE22K23hIUZIaJ26IFO2senVxF41xP"
-API_KEY      = os.getenv("uiqt3492x3k80mq6fu1197qm")        # ex: "uiqt3492x3k80mq6fu1197qm"
-API_HASH     = os.getenv("1EnaDpxpWnzaSpWK7BZyrsV919UmrTb1kouzooeG3rhabeDHPMteQV3jsaIQh6v3")       # ex: "1EnaDp..."
-API_URL      = "https://secure.petro-logistics.com/api/v3/movementsdata"
+API_USERNAME = os.getenv("PL_USERNAME")
+API_PASSWORD = os.getenv("PL_PASSWORD")
+API_KEY      = os.getenv("PL_API_KEY")
+API_HASH     = os.getenv("PL_API_HASH")
+
 
 # === Mapping des jeux de données par "location" ===
 # ⚠️ Remplace <QUERY_IRAN>/<QUERY_IRAQ> par les bons query_name Petro-Logistics
@@ -203,8 +203,9 @@ def render_key_locations_export():
         index=0
     )
     query_name = QUERY_BY_LOCATION[location]
-    if "<QUERY_" in query_name:
+    if isinstance(query_name, str) and query_name.startswith("<") and query_name.endswith(">"):
         st.info(f"⚠️ Renseigne le 'query_name' Petro-Logistics pour **{location}** dans QUERY_BY_LOCATION.")
+
 
     colA, colB = st.columns(2)
     with colA:
