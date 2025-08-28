@@ -23,10 +23,6 @@ except Exception:
     pass
 
 # === Variables d'environnement à définir ===
-API_USERNAME = os.getenv("PL_USERNAME")
-API_PASSWORD = os.getenv("PL_PASSWORD")
-API_KEY      = os.getenv("PL_API_KEY")
-API_HASH     = os.getenv("PL_API_HASH")
 API_URL = "https://secure.petro-logistics.com/api/v3/movementsdata"
 
 
@@ -51,13 +47,23 @@ def auth_header(user, pwd):
     return {"Authorization": f"Basic {token}"}
 
 def fetch_xml(query_name: str) -> ET.Element:
-    if not (API_USERNAME and API_PASSWORD and API_KEY and API_HASH):
-        raise RuntimeError("Identifiants API manquants. Renseigne PL_USERNAME, PL_PASSWORD, PL_API_KEY, PL_API_HASH.")
-    headers = {"Accept": "application/xml", **auth_header(API_USERNAME, API_PASSWORD)}
-    payload = {"api_key": API_KEY, "api_hash": API_HASH, "format": "xml", "query_name": query_name}
+    # Read credentials NOW (not at import time)
+    user = os.getenv("PL_USERNAME")
+    pwd  = os.getenv("PL_PASSWORD")
+    key  = os.getenv("PL_API_KEY")
+    hsh  = os.getenv("PL_API_HASH")
+
+    if not all([user, pwd, key, hsh]):
+        raise RuntimeError(
+            "Identifiants API manquants. Renseigne PL_USERNAME, PL_PASSWORD, PL_API_KEY, PL_API_HASH."
+        )
+
+    headers = {"Accept": "application/xml", **auth_header(user, pwd)}
+    payload = {"api_key": key, "api_hash": hsh, "format": "xml", "query_name": query_name}
     r = requests.post(API_URL, headers=headers, data=payload, timeout=60)
     r.raise_for_status()
     return ET.fromstring(r.text)
+
 
 def compute_monthly(root: ET.Element, countries: list, since=datetime(2024,1,1)):
     monthly = defaultdict(lambda: defaultdict(float))
