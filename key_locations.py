@@ -27,6 +27,7 @@ API_USERNAME = os.getenv("PL_USERNAME")
 API_PASSWORD = os.getenv("PL_PASSWORD")
 API_KEY      = os.getenv("PL_API_KEY")
 API_HASH     = os.getenv("PL_API_HASH")
+API_URL = "https://secure.petro-logistics.com/api/v3/movementsdata"
 
 
 # === Mapping des jeux de données par "location" ===
@@ -192,11 +193,6 @@ def b64_download_link(data: bytes, filename: str, label: str):
     b64 = base64.b64encode(data).decode()
     href = f'<a href="data:file/png;base64,{b64}" download="{filename}">{label}</a>'
     st.markdown(href, unsafe_allow_html=True)
-
-from pathlib import Path
-p = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
-st.caption("Secrets file check")
-st.write({"expected_path": str(p), "exists": p.exists()})
 
 # === Rendu Streamlit de l’onglet ===
 def render_key_locations_export():

@@ -29,21 +29,36 @@ except Exception:
     pass
 
 def _load_project_secrets_into_env() -> None:
-    """Load FUEL DASHBOARD/.streamlit/secrets.toml if present and push to os.environ."""
+    """Load .streamlit/secrets.toml if present and push to os.environ."""
     secrets_path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
     if not secrets_path.exists():
         return
-    # Try Python 3.11+ tomllib, else fall back to toml
+    text = secrets_path.read_text(encoding="utf-8")
+
+    # 1) Try Python 3.11+ tomllib
+    data = None
     try:
-        import tomllib
-        data = tomllib.loads(secrets_path.read_text(encoding="utf-8"))
+        import tomllib  # type: ignore
+        data = tomllib.loads(text)
     except Exception:
+        # 2) Try 'toml' package
         try:
-            import toml  # pip install toml if needed
-            data = toml.loads(secrets_path.read_text(encoding="utf-8"))
+            import toml  # type: ignore
+            data = toml.loads(text)
         except Exception:
+            # 3) Ultra-simple fallback parser (clé = "valeur" en 1er niveau)
             data = {}
-    for k, v in data.items():
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and v:
+                    data[k] = v
+
+    for k, v in (data or {}).items():
         if isinstance(v, (str, int, float)) and not os.getenv(k):
             os.environ[k] = str(v)
 
@@ -67,6 +82,7 @@ for k in ("PL_USERNAME", "PL_PASSWORD", "PL_API_KEY", "PL_API_HASH", "EA_PDF_DIR
         os.environ[k] = v
 
 from key_locations import render_key_locations_export
+
 
 
 # ------------ Page config ------------
