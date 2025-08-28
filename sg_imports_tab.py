@@ -166,23 +166,111 @@ def _find_header_positions(arr: pd.DataFrame, header_row_idx: int, scan_rows: in
                 month_col = c
     return year_col, month_col
 
+def _build_region_groups(col_label: dict[int, str]) -> list[tuple[str, list[int]]]:
+    """
+    Regroupe les colonnes adjacentes qui portent le même libellé de région.
+    Retourne une liste de (region_label, [indices_de_colonnes]).
+    """
+    groups: list[tuple[str, list[int]]] = []
+    last_lab = None
+    last_idx = []
+    for j in sorted(col_label.keys()):
+        lab = col_label[j]
+        if not _is_valid_region(lab) or "total" in lab.lower():
+            # on ignore Total / entêtes parasites
+            continue
+        if lab == last_lab and last_idx and j == last_idx[-1] + 1:
+            last_idx.append(j)            # même région, colonne adjacente -> même groupe
+        else:
+            if last_lab is not None and last_idx:
+                groups.append((last_lab, last_idx))
+            last_lab = lab
+            last_idx = [j]
+    if last_lab is not None and last_idx:
+        groups.append((last_lab, last_idx))
+    return groups
+
+
+def _coerce_group_number(row: list[str], idxs: list[int]) -> float:
+    """
+    Concatène les cellules d'un même groupe, enlève espaces/virgules, puis float().
+    Ex: ['3','943',''] -> '3943' -> 3943.0
+    """
+    raw = "".join(str(row[j]) for j in idxs if j < len(row))
+    raw = raw.replace(",", "").replace(" ", "").strip()
+    if raw == "" or raw.lower() in {"nan", "none", "—", "-"}:
+        return 0.0
+    try:
+        return float(raw)
+    except Exception:
+        # dernier filet de sécurité : si ça échoue, retombe sur l'ancienne logique (somme)
+        return sum(_coerce_numeric(row[j]) for j in idxs if j < len(row))
+
+
 
 def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.DataFrame:
     """
     Convertit la table brute (page 3) en lignes mensuelles robustes.
     Sortie : Year, Month, <régions...>, Total
-    - Reconstruit les entêtes multi-colonnes (régions)
-    - Détecte Year/Month par leur vraie colonne (pas n’importe où dans la ligne)
-    - Saute les lignes 'Total' et 'year-summary'
+
+    Points clés :
+    - Reconstruit les entêtes multi-colonnes (régions) via _scan_header_labels
+    - Identifie la (vraie) colonne Year et la (vraie) colonne Month via _find_header_positions
+    - Regroupe les colonnes ADJACENTES portant le même libellé de région,
+      puis concatène leurs cellules ('3' + '943' -> '3943') avant conversion.
+    - Ignore les lignes 'Total' / sous-totaux / lignes d'entête d'année.
     """
+
+    # ---- Helpers locaux (autonomes dans la fonction) -------------------------
+    def _build_region_groups(col_label: dict[int, str]) -> list[tuple[str, list[int]]]:
+        """
+        Regroupe les colonnes adjacentes qui portent le même libellé de région.
+        Retourne une liste de (region_label, [indices_de_colonnes]).
+        """
+        groups: list[tuple[str, list[int]]] = []
+        last_lab = None
+        last_idx: list[int] = []
+        for j in sorted(col_label.keys()):
+            lab = col_label[j]
+            if not _is_valid_region(lab) or "total" in lab.lower():
+                # on ignore Total / entêtes parasites
+                continue
+            if lab == last_lab and last_idx and j == last_idx[-1] + 1:
+                # même région et colonne adjacente -> même groupe
+                last_idx.append(j)
+            else:
+                if last_lab is not None and last_idx:
+                    groups.append((last_lab, last_idx))
+                last_lab = lab
+                last_idx = [j]
+        if last_lab is not None and last_idx:
+            groups.append((last_lab, last_idx))
+        return groups
+
+    def _coerce_group_number(row: list[str], idxs: list[int]) -> float:
+        """
+        Concatène les cellules d'un même groupe, enlève espaces/virgules, puis float().
+        Ex: ['3','943',''] -> '3943' -> 3943.0
+        Fallback de sécurité : si la concaté renvoie une valeur invalide, somme simple.
+        """
+        raw = "".join(str(row[j]) for j in idxs if j < len(row))
+        raw = raw.replace(",", "").replace(" ", "").strip()
+        if raw == "" or raw.lower() in {"nan", "none", "—", "-"}:
+            return 0.0
+        try:
+            return float(raw)
+        except Exception:
+            return sum(_coerce_numeric(row[j]) for j in idxs if j < len(row))
+
+    # ---- Garde-fous ----------------------------------------------------------
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # Normalisation
+    # ---- Normalisation -------------------------------------------------------
     arr = df.copy().where(pd.notna(df), "").astype(str)
     arr = arr.applymap(lambda s: s.strip())
 
-    # 1) Ligne d'entête qui contient "Year"
+    # ---- 1) Trouver la ligne d'entête qui contient "Year" --------------------
     header_row_idx = None
     for i in range(min(len(arr), 30)):
         if "year" in [c.lower() for c in arr.iloc[i].tolist()]:
@@ -191,48 +279,51 @@ def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.
     if header_row_idx is None:
         header_row_idx = 0
 
-    # 2) Cartographie colonnes -> régions + positions Year/Month
+    # ---- 2) Cartographie colonnes -> régions + positions Year/Month ----------
     scan_rows = min(8, len(arr) - header_row_idx)
     scan_blk  = arr.iloc[header_row_idx: header_row_idx + scan_rows].copy()
-    col_label = _scan_header_labels(scan_blk, header_rows=len(scan_blk))  # déjà dans ton code
+
+    # libellés de colonnes (peuvent couvrir 1–3 colonnes par région)
+    col_label = _scan_header_labels(scan_blk, header_rows=len(scan_blk))
+
+    # positions (index de colonne) de "Year" et "Month"
     year_col, month_col = _find_header_positions(arr, header_row_idx, scan_rows=scan_rows)
 
-    def _col_label_or_empty(j: int) -> str:
-        lab = col_label.get(j, "").strip()
-        return lab if _is_valid_region(lab) and "total" not in lab.lower() else ""
+    # groupes de colonnes adjacentes par région (pour concaténer les chiffres)
+    region_groups = _build_region_groups(col_label)
 
     year_rx = re.compile(r"(20\d{2})")
     current_year: Optional[str] = None
     current_month: Optional[str] = None
     acc: dict[tuple[str, str], dict[str, float]] = {}
 
-    # 3) On saute le bloc d'entête
+    # ---- 3) Balayage des lignes (on saute le bloc d'entête) ------------------
     start_i = header_row_idx + scan_rows
     for i in range(start_i, len(arr)):
         row = arr.iloc[i].tolist()
         row_all_txt = " ".join(str(x).lower() for x in row)
 
-        # skip toute ligne 'total'
+        # ignorer sous-totaux ou lignes 'total'
         if "total" in row_all_txt:
             continue
 
-        # Year depuis SA colonne prioritaire
+        # Année depuis SA colonne prioritaire
         yr = None
         if year_col is not None and year_col < len(row):
             m = year_rx.search(str(row[year_col]))
             if m:
                 yr = m.group(1)
 
-        # Month depuis SA colonne prioritaire
+        # Mois depuis SA colonne prioritaire
         mo = None
         if month_col is not None and month_col < len(row):
             mo = _detect_month_in_row([row[month_col]])
 
-        # fallback ultra-limité si month_col manquant
+        # Fallback ultra-limité si month_col absent
         if mo is None and month_col is None:
             mo = _detect_month_in_row(row[:3])
 
-        # Lignes 'year header/summary' : année présente, mois absent -> reset et skip
+        # Lignes d'entête d'année : année vue, pas de mois -> on met à jour l'année et on saute
         if yr and not mo:
             current_year = yr
             current_month = None
@@ -251,33 +342,33 @@ def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.
         key = (key_year, current_month)
         bucket = acc.setdefault(key, {})
 
-        # agrégation par vraies régions
-        for j, val in enumerate(row):
-            lab = _col_label_or_empty(j)
-            if not lab:
-                continue
-            v = _coerce_numeric(val)
-            if v == 0:
-                continue
-            bucket[lab] = bucket.get(lab, 0.0) + v
+        # ---- Agrégation par groupes (concaténation) --------------------------
+        for lab, idxs in region_groups:
+            v = _coerce_group_number(row, idxs)
+            if v != 0.0:
+                bucket[lab] = bucket.get(lab, 0.0) + v
 
     if not acc:
         return pd.DataFrame()
 
+    # ---- 4) DataFrame final ---------------------------------------------------
     out = pd.DataFrame(
         [{"Year": yr, "Month": mo, **vals} for (yr, mo), vals in acc.items()]
     )
     if out.empty:
         return out
 
+    # Nettoyage colonnes + Total (uniquement sur vraies régions)
     out.columns = [str(c).strip().replace("\n", " ").replace("  ", " ") for c in out.columns]
     region_cols = [c for c in out.columns if _is_valid_region(c)]
     out["Total"] = out[region_cols].sum(axis=1)
 
+    # Tri calendrier
     out["Month"] = pd.Categorical(out["Month"], categories=MONTHS_ORDER, ordered=True)
     out = out.sort_values(["Year", "Month"]).reset_index(drop=True)
     out = out[["Year", "Month"] + region_cols + ["Total"]]
     return out
+
 
 
 # ---------- Auto-pick du dernier PDF dans un dossier ----------
