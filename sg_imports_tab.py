@@ -147,14 +147,33 @@ def _scan_header_labels(arr: pd.DataFrame, header_rows: int = 6) -> dict[int, st
     return col_label
 
 
+def _find_header_positions(arr: pd.DataFrame, header_row_idx: int, scan_rows: int = 8) -> tuple[int|None, int|None]:
+    """
+    Retourne (year_col, month_col) en scannant 'scan_rows' lignes d'entête
+    à partir de header_row_idx. Renvoie None si non trouvé.
+    """
+    year_col = None
+    month_col = None
+    hi = min(len(arr), header_row_idx + scan_rows)
+    for r in range(header_row_idx, hi):
+        for c in range(arr.shape[1]):
+            cell = str(arr.iat[r, c]).strip().lower()
+            if not cell or cell == "none":
+                continue
+            if "year" in cell and year_col is None:
+                year_col = c
+            if "month" in cell and month_col is None:
+                month_col = c
+    return year_col, month_col
+
+
 def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.DataFrame:
     """
     Convertit la table brute (page 3) en lignes mensuelles robustes.
     Sortie : Year, Month, <régions...>, Total
-    - Reconstruit les entêtes sur 1–3 colonnes (via _scan_header_labels)
-    - Ignore les colonnes 'Total'
-    - Ne démarre l’agrégation qu’APRÈS les lignes d’entête
-    - Détecte le mois uniquement dans les 1–3 premières colonnes
+    - Reconstruit les entêtes multi-colonnes (régions)
+    - Détecte Year/Month par leur vraie colonne (pas n’importe où dans la ligne)
+    - Saute les lignes 'Total' et 'year-summary'
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -163,7 +182,7 @@ def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.
     arr = df.copy().where(pd.notna(df), "").astype(str)
     arr = arr.applymap(lambda s: s.strip())
 
-    # 1) ligne d'entête (celle qui contient "Year")
+    # 1) Ligne d'entête qui contient "Year"
     header_row_idx = None
     for i in range(min(len(arr), 30)):
         if "year" in [c.lower() for c in arr.iloc[i].tolist()]:
@@ -172,61 +191,59 @@ def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.
     if header_row_idx is None:
         header_row_idx = 0
 
-    # 2) reconstruire les libellés colonne -> région en scannant plusieurs lignes d'entête
-    scan_rows = min(8, len(arr) - header_row_idx)             # nb de lignes d'entête à considérer
+    # 2) Cartographie colonnes -> régions + positions Year/Month
+    scan_rows = min(8, len(arr) - header_row_idx)
     scan_blk  = arr.iloc[header_row_idx: header_row_idx + scan_rows].copy()
-    col_label = _scan_header_labels(scan_blk, header_rows=len(scan_blk))
+    col_label = _scan_header_labels(scan_blk, header_rows=len(scan_blk))  # déjà dans ton code
+    year_col, month_col = _find_header_positions(arr, header_row_idx, scan_rows=scan_rows)
 
     def _col_label_or_empty(j: int) -> str:
         lab = col_label.get(j, "").strip()
         return lab if _is_valid_region(lab) and "total" not in lab.lower() else ""
 
     year_rx = re.compile(r"(20\d{2})")
-
     current_year: Optional[str] = None
     current_month: Optional[str] = None
     acc: dict[tuple[str, str], dict[str, float]] = {}
-    # --- 3) Scan data rows (AFTER the header block)
+
+    # 3) On saute le bloc d'entête
     start_i = header_row_idx + scan_rows
-    year_rx = re.compile(r"(20\d{2})")
-
-    current_year: Optional[str] = None
-    current_month: Optional[str] = None
-    acc: dict[tuple[str, str], dict[str, float]] = {}
-
     for i in range(start_i, len(arr)):
         row = arr.iloc[i].tolist()
+        row_all_txt = " ".join(str(x).lower() for x in row)
 
-        # 0) If the row looks like any kind of total line, skip it entirely
-        row_txt_all = " ".join(str(x).lower() for x in row)
-        if "total" in row_txt_all:
-            # prevents picking the per-year summary and the final grand total
+        # skip toute ligne 'total'
+        if "total" in row_all_txt:
             continue
 
-        # 1) Detect year and month on THIS row
+        # Year depuis SA colonne prioritaire
         yr = None
-        for c in row[:6]:
-            m = year_rx.search(str(c))
+        if year_col is not None and year_col < len(row):
+            m = year_rx.search(str(row[year_col]))
             if m:
                 yr = m.group(1)
-                break
 
-        mo = _detect_month_in_row(row[:3])  # only look in the first few cells
+        # Month depuis SA colonne prioritaire
+        mo = None
+        if month_col is not None and month_col < len(row):
+            mo = _detect_month_in_row([row[month_col]])
 
-        # 2) If we saw a year but NO month on this row, this is a "year header/summary".
-        #    Start a new year block and drop any carried-over month.
+        # fallback ultra-limité si month_col manquant
+        if mo is None and month_col is None:
+            mo = _detect_month_in_row(row[:3])
+
+        # Lignes 'year header/summary' : année présente, mois absent -> reset et skip
         if yr and not mo:
             current_year = yr
             current_month = None
-            continue  # don't aggregate this line
+            continue
 
-        # 3) Normal month update
-        if mo:
-            current_month = mo
+        # Mise à jour normale
         if yr:
             current_year = yr
+        if mo:
+            current_month = mo
 
-        # 4) Only aggregate once we have both pieces
         key_year = current_year or fallback_year
         if not key_year or not current_month:
             continue
@@ -234,7 +251,7 @@ def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.
         key = (key_year, current_month)
         bucket = acc.setdefault(key, {})
 
-        # 5) Aggregate values for REAL region columns only
+        # agrégation par vraies régions
         for j, val in enumerate(row):
             lab = _col_label_or_empty(j)
             if not lab:
@@ -244,8 +261,9 @@ def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.
                 continue
             bucket[lab] = bucket.get(lab, 0.0) + v
 
+    if not acc:
+        return pd.DataFrame()
 
-    # 4) DataFrame final
     out = pd.DataFrame(
         [{"Year": yr, "Month": mo, **vals} for (yr, mo), vals in acc.items()]
     )
@@ -260,7 +278,6 @@ def _table_to_monthly(df: pd.DataFrame, fallback_year: str | None = None) -> pd.
     out = out.sort_values(["Year", "Month"]).reset_index(drop=True)
     out = out[["Year", "Month"] + region_cols + ["Total"]]
     return out
-
 
 
 # ---------- Auto-pick du dernier PDF dans un dossier ----------
