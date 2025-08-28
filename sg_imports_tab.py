@@ -27,6 +27,74 @@ MONTHS_ORDER = [
     "July","August","September","October","November","December"
 ]
 
+# Mois "fuzzy" (on acceptera Jan/Janua…, Nov/Novemb…, etc.)
+MONTH_PREFIX = {
+    "jan": "January", "feb": "February", "mar": "March", "apr": "April",
+    "may": "May", "jun": "June", "jul": "July", "aug": "August",
+    "sep": "September", "oct": "October", "nov": "November", "dec": "December",
+}
+
+# Libellés attendus (avec mots-clés pour les repérer dans des entêtes cassées)
+_REGION_KEYS = {
+    "Caribbean, Central America": ["caribbean", "centralamerica"],
+    "Mediterranean, North Africa": ["mediterranean", "northafrica"],
+    "Middle East": ["middleeast"],
+    "North America": ["northamerica"],
+    "North Asia": ["northasia"],
+    "Other Africa": ["otherafrica"],
+    "Pacific": ["pacific"],
+    "Russia, FSU": ["russia", "fsu"],
+    "South America": ["southamerica"],
+    "South Asia": ["southasia"],
+    "South East Asia": ["southeastasia", "south east asia"],
+    "Total": ["total"],
+}
+
+def _norm(s: str) -> str:
+    """Minuscule + seulement lettres (utile pour matcher des entêtes cassées)."""
+    return re.sub(r"[^a-z]", "", str(s).lower())
+
+def _detect_month_in_row(cells: list[str]) -> str | None:
+    """Retourne le mois canonique si une cellule commence par Jan/Feb/..."""
+    for c in cells[:8]:
+        n = _norm(c)
+        for pref, full in MONTH_PREFIX.items():
+            if n.startswith(pref):
+                return full
+    return None
+
+def _find_year_in_row(cells: list[str]) -> str | None:
+    """Repère 20xx dans les 6 premières cellules."""
+    for c in cells[:6]:
+        m = re.search(r"(20\d{2})", str(c))
+        if m:
+            return m.group(1)
+    return None
+
+def _scan_header_labels(arr: pd.DataFrame, header_rows: int = 6) -> dict[int, str]:
+    """
+    Regarde les 'header_rows' premières lignes et devine, pour chaque colonne,
+    quel libellé de région elle porte (même si l'entête est sur 2 lignes ou bruitée).
+    """
+    header_rows = min(header_rows, len(arr))
+    col_label: dict[int, str] = {}
+    for j in range(arr.shape[1]):
+        # concatène les cellules d'entête verticalement pour la colonne j
+        txt = " ".join(
+            str(arr.iat[i, j]) for i in range(header_rows)
+            if str(arr.iat[i, j]).strip() not in ("", "None")
+        )
+        n = _norm(txt)
+        if not n:
+            continue
+        for label, keys in _REGION_KEYS.items():
+            if any(k in n for k in keys):
+                col_label[j] = label
+                break
+    return col_label
+
+
+
 # ---------- Auto-pick du dernier PDF dans un dossier ----------
 
 _DATE_PATTERNS = [
@@ -135,104 +203,73 @@ def _coerce_numeric(x):
 
 def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convertit la table brute (page 3) en lignes mensuelles:
+    Convertit la table brute (page 3) en lignes mensuelles robustes :
     colonnes = Year, Month, <régions...>, Total
-    Fonction robuste aux entêtes/colonnes dupliquées et aux cellules vides.
+    - tolère entêtes sur plusieurs lignes/colonnes vides
+    - reconnaît les mois tronqués (Decemb, Septemb, …)
+    - agrège automatiquement les colonnes dupliquées d'une même région
     """
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # Tout en chaînes nettoyées
+    # Tout en chaînes nettoyées (on garde "None" en tant que vide)
     arr = df.copy()
     arr = arr.where(pd.notna(arr), "").astype(str)
     arr = arr.applymap(lambda s: s.strip())
 
-    # 1) Trouver la ligne d'entête (celle qui contient 'Year')
-    header_row_idx = None
-    for i in range(len(arr)):
-        row_lower = [c.lower() for c in arr.iloc[i].tolist()]
-        if "year" in row_lower:
-            header_row_idx = i
-            break
-    if header_row_idx is None:
+    # 1) Détecte quelles colonnes correspondent à quelles régions
+    col_label = _scan_header_labels(arr, header_rows=6)
+    if not col_label:
+        # impossible de relier les colonnes -> abandon propre
         return pd.DataFrame()
 
-    # 2) Reconstruire les noms de colonnes
-    base_hdr = arr.iloc[header_row_idx].tolist()
-    next_hdr = arr.iloc[header_row_idx + 1].tolist() if header_row_idx + 1 < len(arr) else [""] * arr.shape[1]
-
-    cols = []
-    last = ""
-    for j, cell in enumerate(base_hdr):
-        name = cell if cell not in ("", "None") else next_hdr[j]
-        name = (name or "").strip()
-        if name.lower() == "year":
-            cols.append("Year")
-            last = ""
-        else:
-            # propage le dernier nom non vide pour passer les cellules vides dues aux fusions
-            if name:
-                last = name
-            cols.append(last)
-
-    # Si tout est vide (cas extrême), on abandonne
-    if all(c == "" for c in cols):
-        return pd.DataFrame()
-
-    # 3) Parcours des lignes de données
+    # 2) Parcourt les lignes après le bloc d'entête pour extraire Year + Month
     records = []
     current_year: Optional[str] = None
-    year_regex = re.compile(r"(20\d{2})")  # attrape 2024, 2025, etc.
 
-    for i in range(header_row_idx + 1, len(arr)):
+    start_row = 0  # on scannera toutes les lignes
+    for i in range(start_row, len(arr)):
         row = arr.iloc[i].tolist()
 
-        # Annee: si une cellule (parmi les 5 premières) contient un "20xx"
-        yr = None
-        for c in row[:5]:
-            m = year_regex.search(str(c))
-            if m:
-                yr = m.group(1)
-                break
-        if yr:
-            current_year = yr
-            continue  # ligne "Year" seule -> on passe à la suivante
+        # Met à jour l'année si on voit une ligne "2024/2025/…"
+        y = _find_year_in_row(row)
+        if y:
+            current_year = y
+            continue  # souvent ces lignes ne portent pas de valeurs
 
-        # Mois: cherche un nom de mois dans les 6 premières cellules
-        month = None
-        for c in row[:6]:
-            if c in MONTHS_ORDER:
-                month = c
-                break
+        # Cherche un mois (tolère Decemb/Novemb/etc.)
+        month = _detect_month_in_row(row)
         if not month:
             continue
 
-        # 4) Construire l'enregistrement: somme par intitulé (les colonnes dupliquées sont agrégées)
-        rec = {"Year": current_year, "Month": month}
+        # 3) Construit l’enregistrement en sommant par région
+        rec: dict[str, float | str] = {"Year": current_year, "Month": month}
         for j, val in enumerate(row):
-            name = cols[j] if j < len(cols) else ""
-            if name in ("", "Year"):  # on ignore colonnes non nommées et la colonne Year
+            label = col_label.get(j)
+            if not label:
                 continue
             v = _coerce_numeric(val)
             if v == 0:
                 continue
-            rec[name] = rec.get(name, 0.0) + v  # agrège si même entête répété
+            rec[label] = rec.get(label, 0.0) + v  # agrège si la région apparaît 2x
 
-        records.append(rec)
+        # Ne garde la ligne que si on a au moins une valeur chiffrée
+        if any(k not in ("Year", "Month") for k in rec.keys()):
+            records.append(rec)
 
     out = pd.DataFrame(records)
     if out.empty:
         return out
 
-    # Nettoyage des noms + Total recalculé
+    # 4) Nettoyage + Total recalculé
     out.columns = [str(c).strip().replace("\n", " ").replace("  ", " ") for c in out.columns]
     region_cols = [c for c in out.columns if c not in ("Year", "Month", "Total")]
+    out[region_cols] = out[region_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     out["Total"] = out[region_cols].sum(axis=1)
 
-    # Tri Year, Month
+    # 5) Tri Year/Month
     out["Month"] = pd.Categorical(out["Month"], categories=MONTHS_ORDER, ordered=True)
     out = out.sort_values(["Year", "Month"]).reset_index(drop=True)
-
     return out
 
 
