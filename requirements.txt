@@ -8,3 +8,4 @@ networkx
 xlrd
 pdfplumber
 numpy
+python-dotenv

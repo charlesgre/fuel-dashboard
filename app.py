@@ -17,8 +17,9 @@ from fuel_vs_gas import generate_fuel_vs_gas_tab
 from technical_analysis_tab import render as render_technical
 from arbs_tab import render as render_arbs
 
-# ---- Secrets / .env helpers (safe when secrets.toml is absent) ----
+# ---- Secrets / .env helpers (robust even if secrets.toml isn't auto-loaded) ----
 from typing import Optional
+from pathlib import Path
 
 # (optional) load .env if you use one locally
 try:
@@ -26,6 +27,28 @@ try:
     load_dotenv()
 except Exception:
     pass
+
+def _load_project_secrets_into_env() -> None:
+    """Load FUEL DASHBOARD/.streamlit/secrets.toml if present and push to os.environ."""
+    secrets_path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
+    if not secrets_path.exists():
+        return
+    # Try Python 3.11+ tomllib, else fall back to toml
+    try:
+        import tomllib
+        data = tomllib.loads(secrets_path.read_text(encoding="utf-8"))
+    except Exception:
+        try:
+            import toml  # pip install toml if needed
+            data = toml.loads(secrets_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    for k, v in data.items():
+        if isinstance(v, (str, int, float)) and not os.getenv(k):
+            os.environ[k] = str(v)
+
+# Load local secrets file into env (if present)
+_load_project_secrets_into_env()
 
 def _get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
     # Prefer environment variable; only touch st.secrets if present
@@ -38,12 +61,13 @@ def _get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
         return default
 
 # Sync Streamlit secrets -> environment variables
-for k in ("PL_USERNAME", "PL_PASSWORD", "PL_API_KEY", "PL_API_HASH"):
+for k in ("PL_USERNAME", "PL_PASSWORD", "PL_API_KEY", "PL_API_HASH", "EA_PDF_DIR"):
     v = _get_secret(k, None)
     if v and not os.getenv(k):
         os.environ[k] = v
 
 from key_locations import render_key_locations_export
+
 
 # ------------ Page config ------------
 st.set_page_config(page_title="Fuel Dashboard", layout="wide")
