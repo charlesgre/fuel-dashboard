@@ -57,7 +57,7 @@ DEFAULT_COUNTRIES = {
     ],
 
     # 🔹 Irak — on cible exactement cette liste
-    "Iraqi exports": ["Malaysia", "United Arab Emirates", "Egypt", "U.S.A."],
+    "Iraqi exports": ["Malaysia", "United Arab Emirates", "Egypt", "U.S.A.", "Singapore", "Not known"],
 }
 
 # Pour faire correspondre les libellés "côté utilisateur" aux noms réels des colonnes PL
