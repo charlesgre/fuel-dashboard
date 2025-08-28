@@ -83,24 +83,30 @@ def _find_latest_pdf_path(base_dir: str | Path) -> Path | None:
 def _clean_table(df: pd.DataFrame) -> pd.DataFrame:
     # Supprime les colonnes vides / dupliquées, normalise les entêtes
     df = df.copy()
-    # Enlève colonnes totalement vides
-    df = df.loc[:, ~(df.isna() | (df.astype(str).str.strip()=="")).all(0)]
-    # La 1ère ligne contient souvent l'entête; on la promeut si "Year" dedans
+
+    # 1) Enlève colonnes totalement vides (NaN ou chaînes vides après trim)
+    stripped = df.astype(str).applymap(lambda s: s.strip() if pd.notna(s) else s)
+    non_empty_cols = ~(df.isna() | (stripped == "")).all(axis=0)
+    df = df.loc[:, non_empty_cols]
+
+    # 2) La 1ère ligne contient souvent l'entête; on la promeut si "Year" dedans
     header_row_idx = None
     for i in range(min(5, len(df))):
         row = df.iloc[i].astype(str).str.strip().tolist()
-        if any(x.lower()=="year" for x in row):
+        if any(x.lower() == "year" for x in row):
             header_row_idx = i
             break
     if header_row_idx is not None:
         df.columns = df.iloc[header_row_idx].astype(str).str.strip().tolist()
-        df = df.iloc[header_row_idx+1:].reset_index(drop=True)
+        df = df.iloc[header_row_idx + 1 :].reset_index(drop=True)
     else:
         # sinon on forge des noms simples
-        df.columns = [f"col_{i}" for i in range(1, len(df.columns)+1)]
-    # Trim
+        df.columns = [f"col_{i}" for i in range(1, len(df.columns) + 1)]
+
+    # 3) Trim final des cellules
     df = df.applymap(lambda x: str(x).strip() if pd.notna(x) else x)
     return df
+
 
 def _detect_month_rows(df: pd.DataFrame) -> pd.DataFrame:
     # Conserve lignes dont 1ère colonne ∈ {year, month, total}
