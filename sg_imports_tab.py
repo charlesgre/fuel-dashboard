@@ -161,7 +161,10 @@ def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
         records.append(rec)
 
     out = pd.DataFrame(records)
-    ...
+
+    # ➜ si rien n'a été reconnu, on renvoie tel quel (DataFrame vide)
+    if out.empty:
+        return out
 
     # Nettoie les noms de colonnes (régions)
     out.columns = [c.strip().replace("\n"," ").replace("  "," ") for c in out.columns]
@@ -173,6 +176,7 @@ def _table_to_monthly(df: pd.DataFrame) -> pd.DataFrame:
     out["Month"] = pd.Categorical(out["Month"], categories=MONTHS_ORDER, ordered=True)
     out = out.sort_values(["Year","Month"]).reset_index(drop=True)
     return out
+
 
 def _extract_tables_from_pdf(pdf_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -210,27 +214,73 @@ def _extract_tables_from_pdf(pdf_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFra
 def _monthly_total_fig(df_monthly: pd.DataFrame, fuel: str) -> go.Figure:
     """
     Construit le graphe 'Monthly SG {fuel} Import (kt)' en barres empilées par régions,
-    + ligne de total.
+    + ligne de total. Robuste si le parsing PDF renvoie un DF vide ou sans Year/Month.
     """
     title = f"Monthly SG {fuel} Import (kt)"
-    # Construit index X: "{Year}-{Month}"
-    x = df_monthly["Year"].astype(str) + " " + df_monthly["Month"].astype(str)
-
-    region_cols = [c for c in df_monthly.columns if c not in ("Year","Month","Total")]
     fig = go.Figure()
 
+    # Garde-fous : DF vide ou colonnes essentielles manquantes
+    if (
+        df_monthly is None
+        or df_monthly.empty
+        or "Year" not in df_monthly.columns
+        or "Month" not in df_monthly.columns
+    ):
+        fig.add_annotation(
+            text="No monthly data parsed from PDF",
+            x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False
+        )
+        fig.update_layout(
+            title=title,
+            xaxis_title="Month",
+            yaxis_title="Kilotonnes (kt)",
+            hovermode="x unified",
+            margin=dict(l=10, r=10, t=60, b=10),
+            legend=dict(orientation="v"),
+        )
+        return fig
+
+    # Copie triée par Year puis Month (ordre calendaire)
+    tmp = df_monthly.copy()
+    try:
+        tmp["__MonthCat"] = pd.Categorical(
+            tmp["Month"].astype(str),
+            categories=MONTHS_ORDER,
+            ordered=True
+        )
+        tmp = tmp.sort_values(["Year", "__MonthCat"]).drop(columns="__MonthCat")
+    except Exception:
+        # si Month ne matche pas exactement, on garde l'ordre original
+        pass
+
+    # Colonnes régions (tout sauf Year/Month/Total)
+    region_cols = [c for c in tmp.columns if c not in ("Year", "Month", "Total")]
+
+    # Forcer numérique et recalculer Total si absent
+    for c in region_cols:
+        tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
+    if "Total" not in tmp.columns:
+        tmp["Total"] = tmp[region_cols].sum(axis=1) if region_cols else 0.0
+
+    # Axe X : "YYYY Month"
+    x = tmp["Year"].astype(str) + " " + tmp["Month"].astype(str)
+
+    # Barres empilées par région (palette TAB10)
     for i, col in enumerate(region_cols):
         fig.add_trace(go.Bar(
             x=x,
-            y=df_monthly[col],
+            y=tmp[col],
             name=col,
             marker_color=TAB10[i % len(TAB10)],
             hovertemplate=f"<b>{col}</b><br>%{{x}}<br>%{{y:.0f}} kt<extra></extra>",
         ))
 
-    # Total en ligne
+    # Ligne du total
     fig.add_trace(go.Scatter(
-        x=x, y=df_monthly["Total"], mode="lines+markers", name="Total",
+        x=x,
+        y=tmp["Total"],
+        mode="lines+markers",
+        name="Total",
     ))
 
     fig.update_layout(
@@ -243,6 +293,7 @@ def _monthly_total_fig(df_monthly: pd.DataFrame, fuel: str) -> go.Figure:
         legend=dict(orientation="v"),
     )
     return fig
+
 
 def _style_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     # format joli pour les tableaux bruts
@@ -309,6 +360,14 @@ def render_sg_imports_tab(default_dir: str | None = None):
     # Nettoyage / mise en forme (mensuel par régions)
     hsfo_monthly = _table_to_monthly(hsfo_raw)
     lsfo_monthly = _table_to_monthly(lsfo_raw)
+
+    if hsfo_monthly.empty:
+        st.warning("Aucune ligne mensuelle HSFO n'a été détectée dans la page 3. "
+                "Aperçu du tableau brut ci-dessous (debug).")
+        st.dataframe(hsfo_raw.head(20), use_container_width=True)
+
+    if lsfo_monthly.empty:
+        st.info("Aucune ligne mensuelle LSFO détectée (facultatif).")
 
     # =============== PAGE 2 cible: Monthly SG HSFO Import
     st.subheader("Monthly SG HSFO Import (kt) — interactive (reconstruit depuis la page 3)")
