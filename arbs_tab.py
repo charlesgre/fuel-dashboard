@@ -12,6 +12,7 @@ from openpyxl.utils.cell import range_boundaries
 
 DEFAULT_XLSX_PATH = "Arbs/Arbsheet updated.xlsx"
 DEFAULT_SHEET = "MAIN"
+ROW_MAX_DEFAULT = 639  # dernière ligne incluse dans la zone de rendu/export
 
 # just under the imports / constants
 SIGN_COLOR_ROW_LABELS = {
@@ -193,26 +194,38 @@ def _detect_right_cut(ws, min_r, max_r, min_c, max_c,
                 break
     return last_val_col
 
-def _visible_bounds(ws, col_cap: Optional[int] = None):
+def _visible_bounds(ws, col_cap: Optional[int] = None, row_cap_max: Optional[int] = ROW_MAX_DEFAULT):
     max_r = ws.max_row
     max_c = ws.max_column
+
     min_r = 1
     while min_r <= max_r and _is_row_hidden(ws, min_r):
         min_r += 1
     while max_r >= 1 and _is_row_hidden(ws, max_r):
         max_r -= 1
+
+    # <-- applique le plafond de lignes (ex: 639)
+    if isinstance(row_cap_max, int) and row_cap_max > 0:
+        max_r = min(max_r, row_cap_max)
+
     min_c = 1
     while min_c <= max_c and _is_col_hidden(ws, min_c):
         min_c += 1
+
+    # la détection de la "coupe droite" ne regarde que les ~premières lignes visibles
+    # on borne la recherche aux lignes réellement rendues (min_r..max_r)
     detected_end = _detect_right_cut(
         ws, min_r, max_r, min_c, max_c, look_rows=120, empty_run_needed=5
     )
     max_c = detected_end
+
     if col_cap is None:
         max_c = min(max_c, 18)
     elif isinstance(col_cap, int) and col_cap > 0:
         max_c = min(max_c, min_c + col_cap - 1)
+
     return max(min_r, 1), max_r, max(min_c, 1), max_c
+
 
 def _collect_merges(ws) -> Dict[Tuple[int, int], Merge]:
     merges: Dict[Tuple[int,int], Merge] = {}
@@ -223,8 +236,8 @@ def _collect_merges(ws) -> Dict[Tuple[int, int], Merge]:
         merges[(min_r, min_c)] = Merge(min_c, min_r, max_c, max_r)
     return merges
 
-def _extract_dataframe(ws, col_cap: Optional[int]) -> pd.DataFrame:
-    min_r, max_r, min_c, max_c = _visible_bounds(ws, col_cap)
+def _extract_dataframe(ws, col_cap: Optional[int], row_cap_max: Optional[int] = ROW_MAX_DEFAULT) -> pd.DataFrame:
+    min_r, max_r, min_c, max_c = _visible_bounds(ws, col_cap, row_cap_max)
     data = []
     for r in range(min_r, max_r+1):
         if _is_row_hidden(ws, r): continue
@@ -236,8 +249,8 @@ def _extract_dataframe(ws, col_cap: Optional[int]) -> pd.DataFrame:
     cols = [get_column_letter(c) for c in range(min_c, max_c+1) if not _is_col_hidden(ws, c)]
     return pd.DataFrame(data, columns=cols)
 
-def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
-    min_r, max_r, min_c, max_c = _visible_bounds(ws, col_cap)
+def _sheet_to_html(ws, col_cap: Optional[int], row_cap_max: Optional[int] = ROW_MAX_DEFAULT) -> str:
+    min_r, max_r, min_c, max_c = _visible_bounds(ws, col_cap, row_cap_max)
     merges = _collect_merges(ws)
     def _merge_covering(r: int, c: int) -> Optional[Merge]:
         for (tl_r, tl_c), m in merges.items():
