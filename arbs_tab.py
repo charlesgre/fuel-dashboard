@@ -12,7 +12,6 @@ from openpyxl.utils.cell import range_boundaries
 
 DEFAULT_XLSX_PATH = "Arbs/Arbsheet updated.xlsx"
 DEFAULT_SHEET = "MAIN"
-ROW_MAX_DEFAULT = 639  # dernière ligne incluse dans la zone de rendu/export
 
 # just under the imports / constants
 SIGN_COLOR_ROW_LABELS = {
@@ -147,19 +146,16 @@ def _value_sign_bg(cell, force: bool = False) -> str:
     - Si force=True  : applique le rouge/vert même s'il y a déjà un fill (écrase).
     """
     v = cell.value
-
     if not force:
         has_explicit_bg = bool(_hex_color(getattr(getattr(cell, "fill", None), "fgColor", None)))
         if has_explicit_bg:
             return ""
-
     if isinstance(v, (int, float)):
         if v < 0:
-            return "background-color:#fca5a5; color:#000000;"  # rouge un peu plus foncé + texte noir
+            return "background-color:#fca5a5; color:#000000;"  # rouge
         if v > 0:
-            return "background-color:#86efac; color:#000000;"  # vert un peu plus foncé + texte noir
+            return "background-color:#86efac; color:#000000;"  # vert
     return ""
-
 
 # ---------- helpers sheet ----------
 def _is_col_hidden(ws, idx: int) -> bool:
@@ -197,38 +193,26 @@ def _detect_right_cut(ws, min_r, max_r, min_c, max_c,
                 break
     return last_val_col
 
-def _visible_bounds(ws, col_cap: Optional[int] = None, row_cap_max: Optional[int] = ROW_MAX_DEFAULT):
+def _visible_bounds(ws, col_cap: Optional[int] = None):
     max_r = ws.max_row
     max_c = ws.max_column
-
     min_r = 1
     while min_r <= max_r and _is_row_hidden(ws, min_r):
         min_r += 1
     while max_r >= 1 and _is_row_hidden(ws, max_r):
         max_r -= 1
-
-    # <-- applique le plafond de lignes (ex: 639)
-    if isinstance(row_cap_max, int) and row_cap_max > 0:
-        max_r = min(max_r, row_cap_max)
-
     min_c = 1
     while min_c <= max_c and _is_col_hidden(ws, min_c):
         min_c += 1
-
-    # la détection de la "coupe droite" ne regarde que les ~premières lignes visibles
-    # on borne la recherche aux lignes réellement rendues (min_r..max_r)
     detected_end = _detect_right_cut(
         ws, min_r, max_r, min_c, max_c, look_rows=120, empty_run_needed=5
     )
     max_c = detected_end
-
     if col_cap is None:
         max_c = min(max_c, 18)
     elif isinstance(col_cap, int) and col_cap > 0:
         max_c = min(max_c, min_c + col_cap - 1)
-
     return max(min_r, 1), max_r, max(min_c, 1), max_c
-
 
 def _collect_merges(ws) -> Dict[Tuple[int, int], Merge]:
     merges: Dict[Tuple[int,int], Merge] = {}
@@ -239,8 +223,8 @@ def _collect_merges(ws) -> Dict[Tuple[int, int], Merge]:
         merges[(min_r, min_c)] = Merge(min_c, min_r, max_c, max_r)
     return merges
 
-def _extract_dataframe(ws, col_cap: Optional[int], row_cap_max: Optional[int] = ROW_MAX_DEFAULT) -> pd.DataFrame:
-    min_r, max_r, min_c, max_c = _visible_bounds(ws, col_cap, row_cap_max)
+def _extract_dataframe(ws, col_cap: Optional[int]) -> pd.DataFrame:
+    min_r, max_r, min_c, max_c = _visible_bounds(ws, col_cap)
     data = []
     for r in range(min_r, max_r+1):
         if _is_row_hidden(ws, r): continue
@@ -252,34 +236,27 @@ def _extract_dataframe(ws, col_cap: Optional[int], row_cap_max: Optional[int] = 
     cols = [get_column_letter(c) for c in range(min_c, max_c+1) if not _is_col_hidden(ws, c)]
     return pd.DataFrame(data, columns=cols)
 
-def _sheet_to_html(ws, col_cap: Optional[int], row_cap_max: Optional[int] = ROW_MAX_DEFAULT) -> str:
-    min_r, max_r, min_c, max_c = _visible_bounds(ws, col_cap, row_cap_max)
+def _sheet_to_html(ws, col_cap: Optional[int]) -> str:
+    min_r, max_r, min_c, max_c = _visible_bounds(ws, col_cap)
     merges = _collect_merges(ws)
-
     def _merge_covering(r: int, c: int) -> Optional[Merge]:
         for (tl_r, tl_c), m in merges.items():
             if m.min_row <= r <= m.max_row and m.min_col <= c <= m.max_col:
                 return m
         return None
-
     def _find_label_col(r: int) -> int:
-        """Retourne la 1ʳᵉ colonne *utile* pour le libellé (ignore le spacer vide)."""
-        scan_to = min(max_c, min_c + 4)  # scanne les ~5 premières colonnes visibles
+        scan_to = min(max_c, min_c + 4)
         for c in range(min_c, scan_to + 1):
-            if _is_col_hidden(ws, c):
-                continue
+            if _is_col_hidden(ws, c): continue
             cell = ws.cell(r, c)
-            # s'il y a un merge, regarde l'ancre
             m = _merge_covering(r, c)
             if m:
                 anchor_val = ws.cell(m.min_row, m.min_col).value
                 if not _is_empty(anchor_val):
                     return c
-            # sinon, valeur directe
             if not _is_empty(cell.value):
                 return c
-        return min_c  # fallback: la toute première
-
+        return min_c
     html = [
         '<div style="overflow:auto; max-height:80vh; border:1px solid #ddd; padding:8px;">',
         """
@@ -291,23 +268,16 @@ def _sheet_to_html(ws, col_cap: Optional[int], row_cap_max: Optional[int] = ROW_
         """,
         '<table class="arbs-table">'
     ]
-
     covered = set()
     for (tl_r, tl_c), m in merges.items():
         for rr in range(m.min_row, m.max_row + 1):
             for cc in range(m.min_col, m.max_col + 1):
                 if not (rr == tl_r and cc == tl_c):
                     covered.add((rr, cc))
-
     for r in range(min_r, max_r + 1):
-        if _is_row_hidden(ws, r):
-            continue
+        if _is_row_hidden(ws, r): continue
         html.append("<tr>")
-
-        # --- trouver la vraie colonne libellé pour cette ligne ---
         label_col = _find_label_col(r)
-
-        # --- récupérer le libellé + savoir si on est sur la ligne d'ancre du merge ---
         m_first = _merge_covering(r, label_col)
         if m_first:
             label_cell = ws.cell(m_first.min_row, m_first.min_col)
@@ -317,51 +287,34 @@ def _sheet_to_html(ws, col_cap: Optional[int], row_cap_max: Optional[int] = ROW_
             label_cell = ws.cell(r, label_col)
             row_label = re.sub(r"\s+", " ", str(label_cell.value or "").strip().lower())
             on_anchor_row = True
-
         for c in range(min_c, max_c + 1):
-            if _is_col_hidden(ws, c) or (r, c) in covered:
-                continue
-
+            if _is_col_hidden(ws, c) or (r, c) in covered: continue
             cell = ws.cell(r, c)
             m = merges.get((r, c))
             rs = (m.max_row - m.min_row + 1) if m else 1
             cs = (m.max_col - m.min_col + 1) if m else 1
-
             raw_bg = _hex_color(getattr(getattr(cell, "fill", None), "fgColor", None))
             dark_bg = _is_dark(raw_bg) if raw_bg else False
             use_blue = bool(getattr(cell.font, "bold", False)) or dark_bg
-
             styles = []
             styles.append(_border_css(cell.border))
             styles.append(_align_css(cell.alignment))
             styles.append(_fill_css(cell.fill, fallback_blue=use_blue))
-
-            # rouge/vert seulement sur la ligne d'ancre et pas sur la colonne du libellé
             allow_sign_color = (on_anchor_row and row_label in SIGN_COLOR_ROW_LABELS and c != label_col)
             if allow_sign_color:
-                # on écrase le fill existant (bleu) pour obtenir le rouge/vert
                 styles.append(_value_sign_bg(cell, force=True))
-
             styles.append(_font_css(cell.font, force_white=(use_blue or dark_bg)))
-
             if not cell.border or not any(getattr(cell.border, s).style for s in ("left","right","top","bottom")):
                 styles.append("border:1px solid #e6e6e6;")
-
             value_html = _format_cell_value(cell)
             html.append(f'<td rowspan="{rs}" colspan="{cs}" style="{"".join(styles)}">{value_html}</td>')
-
         html.append("</tr>")
-
     html.append("</table></div>")
     return "".join(html)
-
-
-
 
 # ===================== STREAMLIT TAB =====================
 def render():
     st.header("Arbs")
-
     path = st.text_input("Chemin du fichier Excel des arbs :", DEFAULT_XLSX_PATH)
     col1, col2, col3 = st.columns([1,1,1], gap="small")
     editable   = col1.toggle("Mode éditable (grid)", value=False)
@@ -371,25 +324,21 @@ def render():
         min_value=0, max_value=200, value=18, step=1
     )
     cap = int(col_cap) if col_cap and col_cap > 0 else None
-
     try:
         wb = load_workbook(path, data_only=True)
     except Exception as e:
         st.error(f"Impossible d’ouvrir le fichier : {e}")
         st.stop()
-
     visible_sheets = [ws.title for ws in wb.worksheets if ws.sheet_state == "visible"]
     if not visible_sheets:
         st.warning("Aucune feuille visible dans ce classeur.")
         st.stop()
-
     sheet = st.selectbox(
         "Feuille source :", visible_sheets,
         index=visible_sheets.index(DEFAULT_SHEET) if DEFAULT_SHEET in visible_sheets else 0
     )
     ws = wb[sheet]
     cap = int(col_cap) if col_cap and col_cap > 0 else None
-
     if editable:
         st.caption("Vue éditable (valeurs uniquement).")
         df = _extract_dataframe(ws, cap)
@@ -407,7 +356,6 @@ def render():
         st.caption("Rendu fidèle d’Excel (fusions, styles, couleurs plus visibles + règles Excel).")
         html = _sheet_to_html(ws, cap)
         st.markdown(html, unsafe_allow_html=True)
-
         if show_export:
             df = _extract_dataframe(ws, cap)
             out = io.BytesIO()
