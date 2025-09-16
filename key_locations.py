@@ -17,6 +17,14 @@ import streamlit as st
 
 import plotly.graph_objects as go  # NEW
 
+def _get_secret(name: str) -> str | None:
+    """Try Streamlit secrets first, then environment variables."""
+    try:
+        v = st.secrets.get(name)
+    except Exception:
+        v = None
+    return v or os.getenv(name)
+
 # mêmes couleurs que Matplotlib tab10 (bleu, orange, vert, rouge, …)
 TAB10 = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
          '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
@@ -90,15 +98,16 @@ def auth_header(user, pwd):
     return {"Authorization": f"Basic {token}"}
 
 def fetch_xml(query_name: str) -> ET.Element:
-    # Read credentials NOW (not at import time)
-    user = os.getenv("PL_USERNAME")
-    pwd  = os.getenv("PL_PASSWORD")
-    key  = os.getenv("PL_API_KEY")
-    hsh  = os.getenv("PL_API_HASH")
+    # Lire d'abord dans st.secrets, sinon variables d'environnement
+    user = _get_secret("PL_USERNAME")
+    pwd  = _get_secret("PL_PASSWORD")
+    key  = _get_secret("PL_API_KEY")
+    hsh  = _get_secret("PL_API_HASH")
 
     if not all([user, pwd, key, hsh]):
         raise RuntimeError(
-            "Identifiants API manquants. Renseigne PL_USERNAME, PL_PASSWORD, PL_API_KEY, PL_API_HASH."
+            "Identifiants API manquants. Vérifie .streamlit/secrets.toml (PL_USERNAME, "
+            "PL_PASSWORD, PL_API_KEY, PL_API_HASH) ou tes variables d'environnement."
         )
 
     headers = {"Accept": "application/xml", **auth_header(user, pwd)}
