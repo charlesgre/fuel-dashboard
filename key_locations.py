@@ -75,7 +75,7 @@ COUNTRY_ALIASES = {
     "UAE": "United Arab Emirates",
     "UK": "United Kingdom",
     "Turkey": "Türkiye",
-    "Unknown" : "Not known",
+    "Not Known": "Not known",   # <--- important
 }
 
 def _resolve_in_df(df_cols, requested):
@@ -119,56 +119,49 @@ def fetch_xml(query_name: str) -> ET.Element:
 
 
 def compute_monthly(root: ET.Element, countries: list, since=datetime(2024,1,1)):
-    # agrégats: par pays sélectionnés + total tous pays
     monthly_sel = defaultdict(lambda: defaultdict(float))
     monthly_total = defaultdict(float)
 
-    # utilitaire: normaliser un pays selon COUNTRY_ALIASES
     def normalize_country(c: str) -> str:
-        return c if c not in COUNTRY_ALIASES else COUNTRY_ALIASES[c]
+        return COUNTRY_ALIASES.get(c, c)
+
+    # on normalise la liste demandée vers les libellés API
+    wanted_api_names = [normalize_country(c) for c in countries]
 
     for m in root.findall(".//movement"):
         try:
-            api_country = m.findtext("discharge_country") or ""
-            country = normalize_country(api_country)
+            api_country = (m.findtext("discharge_country") or "").strip()
             tonnes = float(m.findtext("qty_tonnes") or 0) / 1000.0
             date = datetime.strptime(m.findtext("load_port_date"), "%Y-%m-%d")
             if date < since:
                 continue
             key = date.strftime("%Y-%m")
 
-            # grand total (tous pays)
             monthly_total[key] += tonnes
-
-            # seulement les pays sélectionnés pour le détail
-            if country in countries:
-                monthly_sel[key][country] += tonnes
+            if api_country in wanted_api_names:
+                monthly_sel[key][api_country] += tonnes
         except Exception:
             continue
 
-    # DF des pays sélectionnés
     df_sel = pd.DataFrame.from_dict(monthly_sel, orient="index").fillna(0).sort_index()
-
-    # Série du total (tous pays)
     s_total = pd.Series(monthly_total, name="Total_all").sort_index()
 
-    # aligne les index
     df = df_sel.reindex(sorted(set(df_sel.index).union(s_total.index))).fillna(0)
     df["Total_all"] = s_total.reindex(df.index).fillna(0)
 
-    # moyenne mobiles sur le total "tous pays"
     df["3M Avg"] = df["Total_all"].rolling(3).mean()
     df["12M Avg"] = df["Total_all"].rolling(12).mean()
 
-    # somme des pays sélectionnés (utile pour le bucket Other/Unknown)
-    selected_sum = df[countries].sum(axis=1) if countries else pd.Series(0, index=df.index)
+    # somme des pays sélectionnés : on ne garde que les colonnes réellement présentes
+    sel_cols_present = [c for c in wanted_api_names if c in df.columns]
+    if sel_cols_present:
+        selected_sum = df[sel_cols_present].sum(axis=1)
+    else:
+        selected_sum = pd.Series(0, index=df.index, dtype=float)
 
-    # bucket Other/Unknown = tout ce qui n'est pas dans la sélection (>= 0)
     df["Other/Unknown"] = (df["Total_all"] - selected_sum).clip(lower=0)
-
     return df
 
-    return df
 
 def compute_discharge_table(root: ET.Element, target_year: int, target_month: int):
     # ⚠️ désormais on filtre sur LOAD (exports)
