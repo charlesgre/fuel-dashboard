@@ -186,7 +186,7 @@ def run_litasco_supply_tab():
     )
     runs_pattern = st.text_input(
         "Pattern de fichier",
-        value="*.xlsx"  # ajuste si besoin (ex: "Europe Runs Recap*.xlsx")
+        value="Europe Runs Recap*.xlsx"
     )
 
     # Alerte UNC si non-Windows
