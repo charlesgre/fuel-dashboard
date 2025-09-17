@@ -75,7 +75,7 @@ COUNTRY_ALIASES = {
     "UAE": "United Arab Emirates",
     "UK": "United Kingdom",
     "Turkey": "Türkiye",
-    "Unknown" : "Not Known",
+    "Unknown" : "Not known",
 }
 
 def _resolve_in_df(df_cols, requested):
