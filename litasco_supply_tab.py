@@ -73,9 +73,17 @@ def pick_runs_path(explicit_path: str, runs_dir: str, pattern: str) -> str:
     """Retourne le fichier explicite si fourni, sinon le plus récent du dossier/pattern."""
     if explicit_path and os.path.exists(explicit_path):
         return explicit_path
-    files = glob.glob(os.path.join(runs_dir, pattern))
+
+    # Sécuriser le chemin UNC → utiliser des / (glob est capricieux avec \)
+    runs_dir_fixed = runs_dir.replace("\\", "/")
+    search_pattern = os.path.join(runs_dir_fixed, pattern)
+
+    files = glob.glob(search_pattern)
     if not files:
-        raise FileNotFoundError(f"Aucun fichier 'Runs' trouvé dans {runs_dir} avec le pattern {pattern}.")
+        raise FileNotFoundError(
+            f"Aucun fichier 'Runs' trouvé dans {runs_dir} avec le pattern {pattern}.\n"
+            f"(Cherché: {search_pattern})"
+        )
     files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return files[0]
 
