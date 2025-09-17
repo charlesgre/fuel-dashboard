@@ -1,16 +1,14 @@
 # balances/litasco_supply_tab.py
 # -*- coding: utf-8 -*-
-import os, glob, sys
+import os, glob, platform
 from datetime import datetime
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import streamlit as st
+import plotly.graph_objects as go
 
-
-# Dossier par défaut pour les fichiers Runs (UNC)
+# --------- Dossier par défaut pour les fichiers Runs (UNC) ---------
 DEFAULT_LITASCO_RUNS_DIR = r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\Litasco balances\Litasco supply"
-
 
 # ========== PARAMETRISATION REGION ==========
 # Dictionnaires par région. NWE est rempli; MED est un placeholder prêt à être complété.
@@ -59,22 +57,25 @@ REFINERIES_BY_REGION = {
         ],
     },
     "MED": {
-        # 👉 à compléter plus tard (capacités & rendements). La logique ci-dessous fonctionne déjà
-        # dès que tu remplis ce dict de la même manière que "NWE".
+        # 👉 à compléter plus tard (capacités & rendements) au même format que NWE.
     }
 }
 
+# --------- Constantes / style ---------
 KBD_TO_KT = 6.35
-COLOR_2026 = "red"; COLOR_2025 = "black"; COLOR_2024 = "green"
-OTHER_CMAP = "tab20"
 BAND_START, BAND_END = 2020, 2024
+SPECIAL_COLORS = {2026: "red", 2025: "black", 2024: "green"}
+MONTH_TICKS = list(range(1, 13))
+MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
+# ================== IO HELPERS ==================
 def pick_runs_path(explicit_path: str, runs_dir: str, pattern: str) -> str:
+    """Retourne le fichier explicite si fourni, sinon le plus récent du dossier/pattern."""
     if explicit_path and os.path.exists(explicit_path):
         return explicit_path
     files = glob.glob(os.path.join(runs_dir, pattern))
     if not files:
-        raise FileNotFoundError("Aucun fichier 'Runs' trouvé.")
+        raise FileNotFoundError(f"Aucun fichier 'Runs' trouvé dans {runs_dir} avec le pattern {pattern}.")
     files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return files[0]
 
@@ -92,147 +93,129 @@ def series_for_country(runs_df: pd.DataFrame, country: str) -> pd.Series | None:
     return None
 
 def nonempty_series(s: pd.Series | None) -> bool:
-    if s is None: return False
+    if s is None:
+        return False
     vals = pd.to_numeric(s, errors="coerce")
     return not (vals.isna().all() or np.nan_to_num(vals.values).sum() == 0.0)
 
-def seasonality_plot_to_file(series: pd.Series, title: str, out_path: str) -> bool:
+# ================== PLOTTING (Plotly interactif) ==================
+def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
+    """Graphique interactif: courbes par année + bande min/max (2020–2024)."""
     s = series.dropna()
-    if s.empty or (s == 0).all(): return False
+    if s.empty or (s == 0).all():
+        return None
 
     df = pd.DataFrame({"kt": s})
     df["Year"] = df.index.year
     df["Month"] = df.index.month
-    ym = (df.groupby(["Year","Month"])["kt"].mean().unstack(level=0).reindex(index=range(1, 13)))
+
+    # Pivot: lignes=mois, colonnes=années
+    ym = (df.groupby(["Year","Month"])["kt"].mean().unstack(level=0).reindex(index=MONTH_TICKS))
 
     years = [int(y) for y in ym.columns if pd.notna(y)]
-    if not years: return False
+    if not years:
+        return None
 
+    # Bande 2020–2024
     band_years = [y for y in range(BAND_START, BAND_END + 1) if y in years]
     band_min = band_max = None
     if band_years:
         band_data = ym[band_years]
-        band_min = band_data.min(axis=1); band_max = band_data.max(axis=1)
+        band_min = band_data.min(axis=1)
+        band_max = band_data.max(axis=1)
 
-    plt.figure(figsize=(7.5, 4.5))
+    fig = go.Figure()
+
+    # Bande grisée (si dispo)
     if band_years and band_min.notna().any() and band_max.notna().any():
-        plt.fill_between(range(1, 13), band_min.values, band_max.values, alpha=0.20, label=f"{BAND_START}–{BAND_END} range")
+        fig.add_trace(go.Scatter(
+            x=MONTH_TICKS, y=band_min.values,
+            mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"
+        ))
+        fig.add_trace(go.Scatter(
+            x=MONTH_TICKS, y=band_max.values,
+            mode="lines", line=dict(width=0),
+            fill="tonexty", fillcolor="rgba(128,128,128,0.20)",
+            name=f"{BAND_START}–{BAND_END} range", hoverinfo="skip"
+        ))
 
-    special = {2026: COLOR_2026, 2025: COLOR_2025, 2024: COLOR_2024}
-    cmap = plt.colormaps.get_cmap(OTHER_CMAP); other_idx = 0
+    # Courbes par année
     for y in sorted(years):
         line = ym[y]
-        if y in special:
-            plt.plot(range(1,13), line.values, linewidth=2.2, label=str(y), color=special[y])
-        else:
-            plt.plot(range(1,13), line.values, linewidth=1.3, label=str(y), color=cmap(other_idx % cmap.N), alpha=0.45)
-            other_idx += 1
+        color = SPECIAL_COLORS.get(y, None)
+        fig.add_trace(go.Scatter(
+            x=MONTH_TICKS, y=line.values,
+            mode="lines+markers",
+            name=str(y),
+            line=dict(width=2 if y in SPECIAL_COLORS else 1.3, color=color),
+            opacity=1.0 if y in SPECIAL_COLORS else 0.6
+        ))
 
-    plt.title(title); plt.xlabel("Month"); plt.ylabel("kt")
-    plt.xticks(range(1,13), ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"])
-    plt.legend(ncol=4, fontsize=8, frameon=False)
-    plt.tight_layout(); plt.savefig(out_path, dpi=160); plt.close()
-    return True
+    fig.update_layout(
+        title=title,
+        xaxis=dict(tickmode="array", tickvals=MONTH_TICKS, ticktext=MONTH_LABELS),
+        yaxis_title="kt",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
+        margin=dict(l=10, r=10, t=50, b=10),
+        height=420
+    )
+    return fig
 
-def build_email_html(files_by_country: dict, files_region_totals: list, run_date: str, region_label: str,
-                     thumb_width_px: int = 320, cell_padding_px: int = 6) -> str:
-    def rows_of_three(paths):
-        for i in range(0, len(paths), 3):
-            yield paths[i:i+3]
-    html = []
-    html.append("<html><body style='font-family:Segoe UI,Arial,sans-serif;font-size:12pt'>")
-    html.append(f"<p>Hi all,</p><p>Please find below the latest seasonality charts for <b>{region_label}</b> (run date: <b>{run_date}</b>).</p>")
-    for country in sorted(files_by_country.keys()):
-        imgs = [p for p in files_by_country[country] if p]
-        if not imgs: continue
-        html.append(f"<h2 style='margin:18px 0 8px 0'>{country}</h2>")
-        html.append("<table role='presentation' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;'>")
-        for trio in rows_of_three(imgs):
-            html.append("<tr>")
-            for path in trio:
-                cid = os.path.basename(path)
-                html.append(
-                    f"<td style='padding:{cell_padding_px}px; vertical-align:top;'>"
-                    f"<img src='cid:{cid}' width='{thumb_width_px}' style='display:block;border:0;outline:none;text-decoration:none;'>"
-                    f"</td>"
-                )
-            for _ in range(3 - len(trio)): html.append(f"<td style='padding:{cell_padding_px}px;'></td>")
-            html.append("</tr>")
-        html.append("</table>")
-    if files_region_totals:
-        html.append(f"<h2 style='margin:22px 0 8px 0'>{region_label} — Totaux</h2>")
-        html.append("<table role='presentation' cellpadding='0' cellspacing='0' border='0' style='border-collapse:collapse;'>")
-        for trio in rows_of_three([p for _, p in sorted(files_region_totals, key=lambda x: str(x[0]).lower())]):
-            html.append("<tr>")
-            for path in trio:
-                cid = os.path.basename(path)
-                html.append(
-                    f"<td style='padding:{cell_padding_px}px; vertical-align:top;'>"
-                    f"<img src='cid:{cid}' width='{thumb_width_px}' style='display:block;border:0;outline:none;text-decoration:none;'>"
-                    f"</td>"
-                )
-            for _ in range(3 - len(trio)): html.append(f"<td style='padding:{cell_padding_px}px;'></td>")
-            html.append("</tr>")
-        html.append("</table>")
-    html.append("<p style='margin-top:18px'>Best regards,<br>(auto-generated)</p>")
-    html.append("</body></html>")
-    return "".join(html)
-
+# ================== MAIN TAB RENDERER ==================
 def run_litasco_supply_tab():
-    st.subheader("Litasco supply (Seasonality)")
+    st.subheader("Litasco supply — seasonality (interactive)")
 
     # ---- UI
     c1, c2, c3 = st.columns([1,1,1])
     with c1:
         region = st.selectbox("Région", ["NWE", "MED"], index=0, help="MED prêt pour plus tard")
     with c2:
-        runs_sheet = st.text_input("Nom de l’onglet Excel (sheet)", value="NWE" if region=="NWE" else "MED")
+        runs_sheet = st.text_input("Onglet Excel (sheet)", value="NWE" if region == "NWE" else "MED")
     with c3:
-        make_email = st.checkbox("Construire l’email HTML (Outlook)", value=True)
+        # bouton pour re-générer
+        pass
 
-    # --- chemins & email ---
+    # Chemins d'entrée (pas d'email ni d'export images)
     runs_file_explicit = st.text_input(
         "Fichier Runs (facultatif, sinon on prend le plus récent)",
-        value=""  # <- vide par défaut, on utilisera runs_dir + runs_pattern
+        value=""  # vide => on cherche dans le dossier
     )
     runs_dir = st.text_input(
-        "Dossier Runs (recherche du dernier fichier)",
+        "Dossier des Runs (on prend le plus récent)",
         value=DEFAULT_LITASCO_RUNS_DIR
     )
     runs_pattern = st.text_input(
-        "Pattern fichier",
-        value="*.xlsx"   # générique ; change si tu veux "Europe Runs Recap*.xlsx"
+        "Pattern de fichier",
+        value="*.xlsx"  # ajuste si besoin (ex: "Europe Runs Recap*.xlsx")
     )
 
-    # Dossier de sortie : par défaut un sous-dossier 'Output' à côté des Runs
-    suggested_out = os.path.join(DEFAULT_LITASCO_RUNS_DIR, "Output")
-    out_root = st.text_input(
-        "Dossier de sortie",
-        value=suggested_out
-    )
-
-    email_to = st.text_input("Email TO", value="NKRYEZIU@litasco.com; wvonschweinitz@litasco.com")
-    email_cc = st.text_input("Email CC", value="mchapovalov@litasco.com; cnorgeot@litasco.com; iivanov@litasco.com")
-    subj_base = st.text_input("Sujet base", value=f"{region} Fuel Production — Seasonality Charts")
+    # Alerte UNC si non-Windows
+    if platform.system() != "Windows" and (runs_dir.startswith("\\") or runs_dir.startswith("//")):
+        st.warning(
+            "Chemin réseau UNC détecté sur un runtime non-Windows. "
+            "Monte le partage réseau ou fournis un fichier local via 'Fichier Runs'."
+        )
 
     st.markdown("---")
-    go = st.button("Générer")
+    go = st.button("Générer les graphiques")
 
     if not go:
-        st.info("Config ok. Clique **Générer** pour produire les graphiques et l’email.")
+        st.info("Renseigne les options ci-dessus puis clique **Générer les graphiques**.")
         return
 
-    # ---- LOGIQUE
+    # ---- Chargement runs
     try:
         runs_path = pick_runs_path(runs_file_explicit, runs_dir, runs_pattern)
+        st.success(f"Fichier Runs utilisé : **{os.path.basename(runs_path)}**")
+        st.caption(runs_path)
     except Exception as e:
-        st.error(f"Erreur Runs: {e}")
+        st.error(f"Erreur Runs : {e}")
         return
 
     try:
         runs_df = load_runs(runs_path, runs_sheet)
     except Exception as e:
-        st.error(f"Lecture Excel: {e}")
+        st.error(f"Lecture Excel : {e}")
         return
 
     REFINERIES = REFINERIES_BY_REGION.get(region, {})
@@ -243,141 +226,162 @@ def run_litasco_supply_tab():
     target_countries = list(REFINERIES.keys())
     all_products = sorted({prod for plist in REFINERIES.values() for r in plist for prod in r["Yields"].keys()})
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    os.makedirs(out_root, exist_ok=True)
-    out_dir = os.path.join(out_root, f"Seasonals_{region}_{today}")
-    os.makedirs(out_dir, exist_ok=True)
+    # Structures pour affichage
+    refinery_product: dict[tuple[str, str], pd.DataFrame] = {}  # (country, refinery) -> df produits
+    country_product: dict[str, dict[str, pd.Series]] = {c: {} for c in target_countries}
+    totals_product: dict[str, pd.Series | None] = {p: None for p in all_products}
 
-    files_by_country = {c: [] for c in target_countries}
-    files_region_totals = []
-    country_product = {c: {} for c in target_countries}
-    totals_product = {p: None for p in all_products}
-
-    # Calculs
+    # ---- Calculs (refinery -> country -> region)
     for country in target_countries:
         runs_c = series_for_country(runs_df, country)
-        if not nonempty_series(runs_c): continue
+        if not nonempty_series(runs_c):
+            continue
 
         refs = REFINERIES[country]
         total_cap = sum(r["Capacity"] for r in refs)
-        if total_cap == 0: continue
+        if total_cap == 0:
+            continue
 
-        util = runs_c / total_cap  # facteur d'utilisation
+        util = runs_c / total_cap  # utilisation (kbd/kbd)
 
+        # init pays×produit
         for p in all_products:
             country_product[country][p] = None
 
         for r in refs:
-            Ri = r["Capacity"] * util
+            Ri = r["Capacity"] * util  # kbd
             prod_cols = {}
             for prod, y in r["Yields"].items():
-                series_kt = Ri * y * KBD_TO_KT
+                series_kt = Ri * y * KBD_TO_KT  # kt
+                series_kt.name = prod
                 prod_cols[prod] = series_kt
 
-                if country_product[country][prod] is None:
-                    country_product[country][prod] = series_kt.copy()
-                else:
-                    country_product[country][prod] = country_product[country][prod].add(series_kt, fill_value=0.0)
+                # accumulate pays×produit
+                country_product[country][prod] = (
+                    series_kt.copy() if country_product[country][prod] is None
+                    else country_product[country][prod].add(series_kt, fill_value=0.0)
+                )
 
-                if totals_product[prod] is None:
-                    totals_product[prod] = series_kt.copy()
-                else:
-                    totals_product[prod] = totals_product[prod].add(series_kt, fill_value=0.0)
+                # accumulate région×produit
+                totals_product[prod] = (
+                    series_kt.copy() if totals_product[prod] is None
+                    else totals_product[prod].add(series_kt, fill_value=0.0)
+                )
 
+            # compléter colonnes manquantes par 0
             for p in all_products:
                 if p not in prod_cols:
-                    prod_cols[p] = pd.Series(0.0, index=Ri.index)
+                    s0 = pd.Series(0.0, index=Ri.index)
+                    s0.name = p
+                    prod_cols[p] = s0
 
             df_ref = pd.DataFrame(prod_cols, index=Ri.index)[all_products]
+            refinery_product[(country, r["Refinery"])] = df_ref
 
-            # Graphs Raffinerie × Produit
-            for product in df_ref.columns:
-                s = df_ref[product]
-                if s.isna().all() or (s == 0).all(): continue
-                fname = f"{region}_{country.replace(' ','_')}__{r['Refinery'].replace(' ','_')}__{product}_seasonal.png"
-                out_path = os.path.join(out_dir, fname)
-                if seasonality_plot_to_file(s, title=f"Seasonality — {region} / {country} / {r['Refinery']} / {product} (kt)", out_path=out_path):
-                    files_by_country[country].append(out_path)
+    st.success("Graphiques calculés. Affichage…")
 
-    # Graphs Pays × Produit
-    for country, prod_map in country_product.items():
-        cols = {p: s for p, s in prod_map.items() if s is not None and not (s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0))}
-        if not cols: continue
-        df_country = pd.DataFrame(cols)
-        for product in df_country.columns:
-            s = df_country[product]
-            if s.isna().all() or (s == 0).all(): continue
-            fname = f"{region}_{country.replace(' ','_')}__{product}_TOTAL_country_seasonal.png"
-            out_path = os.path.join(out_dir, fname)
-            if seasonality_plot_to_file(s, title=f"Seasonality — {region} / {country} / {product} (kt)", out_path=out_path):
-                files_by_country[country].append(out_path)
+    # ---- AFFICHAGE COMME DANS LE MAIL ----
+    # 1) Par pays — raffineries (grilles 3 par ligne), puis totaux pays
+    for country in sorted(target_countries):
+        # ne rien afficher si le pays n'a pas de données
+        has_any = any(
+            (country, ref["Refinery"]) in refinery_product
+            for ref in REFINERIES.get(country, [])
+        )
+        if not has_any:
+            continue
 
-    # Graphs Région (totaux)
-    for product, s in totals_product.items():
-        if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0): continue
-        fname = f"{region}_TOTAL__{product}_seasonal.png"
-        out_path = os.path.join(out_dir, fname)
-        if seasonality_plot_to_file(s, title=f"Seasonality — {region} Total Supply / {product} (kt)", out_path=out_path):
-            files_region_totals.append((product, out_path))
+        st.header(country)
 
-    st.success(f"Graphiques enregistrés dans : {out_dir}")
+        # Raffineries
+        with st.expander("Refineries", expanded=False):
+            # boucle par raffinerie de ce pays
+            refs = REFINERIES[country]
+            for ref in refs:
+                key = (country, ref["Refinery"])
+                if key not in refinery_product:
+                    continue
+                df_ref = refinery_product[key]
+                st.subheader(f"{ref['Refinery']}")
+                # grille 3 par ligne
+                cols = st.columns(3)
+                col_idx = 0
+                for product in df_ref.columns:
+                    s = df_ref[product]
+                    if s.isna().all() or (s == 0).all():
+                        continue
+                    fig = seasonality_figure(s, f"{country} / {ref['Refinery']} / {product}")
+                    if fig:
+                        with cols[col_idx]:
+                            st.plotly_chart(fig, use_container_width=True)
+                        col_idx = (col_idx + 1) % 3
 
-    # Affichage rapide dans l’app
-    with st.expander("Aperçu des images (quelques-unes)"):
-        count = 0
-        for country in sorted(files_by_country.keys()):
-            for p in files_by_country[country][:3]:
-                st.image(p, caption=os.path.basename(p), use_container_width=True)
-                count += 1
-                if count >= 9:
-                    break
-            if count >= 9: break
+        # Totaux pays × produit
+        st.subheader("Country totals")
+        cols = st.columns(3)
+        col_idx = 0
+        for product, s in country_product[country].items():
+            if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0):
+                continue
+            fig = seasonality_figure(s, f"{country} / {product}")
+            if fig:
+                with cols[col_idx]:
+                    st.plotly_chart(fig, use_container_width=True)
+                col_idx = (col_idx + 1) % 3
 
-    # Export CSV résumé
+        st.markdown("---")
+
+    # 2) Totaux régionaux
+    st.header(f"{region} — Totaux régionaux")
+    cols = st.columns(3)
+    col_idx = 0
+    for product, s in sorted(totals_product.items(), key=lambda kv: kv[0].lower()):
+        if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0):
+            continue
+        fig = seasonality_figure(s, f"{region} Total / {product}")
+        if fig:
+            with cols[col_idx]:
+                st.plotly_chart(fig, use_container_width=True)
+            col_idx = (col_idx + 1) % 3
+
+    # ---- Export CSV résumé (en mémoire) ----
+    today = datetime.now().strftime("%Y-%m-%d")
     summary_rows = []
+    # pays
     for country, prod_map in country_product.items():
         for product, s in prod_map.items():
-            if s is None: continue
-            summary_rows.append({"Region": region, "Country": country, "Product": product,
-                                "Avg_kt": round(float(s.mean()), 2), "Total_kt": round(float(s.sum()), 2)})
+            if s is None:
+                continue
+            summary_rows.append({
+                "Region": region,
+                "Country": country,
+                "Product": product,
+                "Avg_kt": round(float(pd.to_numeric(s, errors="coerce").mean()), 2),
+                "Total_kt": round(float(pd.to_numeric(s, errors="coerce").sum()), 2),
+            })
+    # région
     for product, s in totals_product.items():
-        if s is None: continue
-        summary_rows.append({"Region": region, "Country": f"{region} Total", "Product": product,
-                            "Avg_kt": round(float(s.mean()), 2), "Total_kt": round(float(s.sum()), 2)})
+        if s is None:
+            continue
+        summary_rows.append({
+            "Region": region,
+            "Country": f"{region} Total",
+            "Product": product,
+            "Avg_kt": round(float(pd.to_numeric(s, errors="coerce").mean()), 2),
+            "Total_kt": round(float(pd.to_numeric(s, errors="coerce").sum()), 2),
+        })
 
-    df_summary = pd.DataFrame(summary_rows).sort_values(["Region","Country","Product"]).reset_index(drop=True)
-    st.dataframe(df_summary, use_container_width=True)
-    csv_path = os.path.join(out_dir, f"Summary_{region}_{today}.csv")
-    df_summary.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    st.download_button("Télécharger le CSV", data=open(csv_path,"rb"), file_name=os.path.basename(csv_path), mime="text/csv")
+    if summary_rows:
+        df_summary = pd.DataFrame(summary_rows).sort_values(["Region","Country","Product"]).reset_index(drop=True)
+        st.subheader("Résumé (tableau)")
+        st.dataframe(df_summary, use_container_width=True)
 
-    # Email (HTML + pièces jointes inline)
-    if make_email:
-        html = build_email_html(files_by_country, files_region_totals, today, region_label=region, thumb_width_px=400, cell_padding_px=6)
-        st.download_button("Télécharger l’HTML de l’email", data=html.encode("utf-8"), file_name=f"email_{region}_{today}.html", mime="text/html")
-
-        if st.checkbox("Ouvrir un brouillon Outlook (Windows + pywin32)", value=False):
-            try:
-                import win32com.client as win32
-                outlook = win32.Dispatch("Outlook.Application")
-                mail = outlook.CreateItem(0)
-                mail.To = email_to; mail.CC = email_cc
-                mail.Subject = f"{subj_base} — {today}"
-
-                # Attacher images en inline
-                cid_map = {}
-                for _, paths in files_by_country.items():
-                    for p in paths:
-                        cid_map[os.path.basename(p)] = p
-                for _, p in files_region_totals:
-                    cid_map[os.path.basename(p)] = p
-
-                for cid, path in cid_map.items():
-                    attach = mail.Attachments.Add(path)
-                    attach.PropertyAccessor.SetProperty("http://schemas.microsoft.com/mapi/proptag/0x3712001F", cid)
-
-                mail.HTMLBody = html
-                mail.Display(True)
-                st.info("Fenêtre de composition Outlook ouverte.")
-            except Exception as e:
-                st.warning(f"pywin32 non disponible ou Outlook indisponible : {e}")
+        csv_bytes = df_summary.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        st.download_button(
+            "Télécharger le CSV résumé",
+            data=csv_bytes,
+            file_name=f"Summary_{region}_{today}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("Aucune donnée non-nulle à résumer.")
