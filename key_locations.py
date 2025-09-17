@@ -52,7 +52,7 @@ QUERY_BY_LOCATION = {
 # === Pays par défaut (à ajuster si besoin) ===
 DEFAULT_COUNTRIES = {
     # on garde la Russie comme avant
-    "Global Russian exports": ["India", "China", "Egypt", "Saudi Arabia", "Malaysia", "Singapore"],
+    "Global Russian exports": ["India", "China", "Egypt", "Saudi Arabia", "Malaysia", "Singapore", "Not Known"],
 
     # 🔹 Iran — on cible exactement cette liste (l’ordre est respecté)
     "Iranian exports": [
