@@ -121,7 +121,7 @@ def get_ea_data_cached(_parser_version: str):
 # ------------ Tabs ------------
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
     "📊 Prices", "⛽ Bunker Diff", "CDD/Temperatures",
-    "Balances (FGE / EA)", "📈 Forward Curves", "Platts Window",
+    "Balances (FGE / EA / Litasco)", "📈 Forward Curves", "Platts Window",
     "📦 Fuel Stocks", "Gas vs Fuel", "🔍 Technical Analysis", "📑 Arbs",
     "🇸🇬 SG hub tracking",  # 👈 NOUVEL ONGLET
     "🌍 Key locations export"
@@ -179,7 +179,7 @@ with tab3:
 
 # === TAB 4: BALANCES ===
 with tab4:
-    st.header("Balances FGE/EA/Litasco")
+    st.header("Balances")
 
     # Sous-onglets : FGE/EA existant + nouveau 'Litasco supply'
     subtab_fge_ea, subtab_litasco = st.tabs(["FGE / EA", "Litasco supply"])
