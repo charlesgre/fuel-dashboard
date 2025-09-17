@@ -200,8 +200,10 @@ def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
     )
     return fig
 
-def render_fig_grid(figs: list[go.Figure | None], max_cols: int = 3):
-    """Affiche les figures en 1..max_cols colonnes, centrées si < max_cols."""
+def render_fig_grid(figs: list[go.Figure | None], max_cols: int = 3, key_prefix: str = "fig"):
+    """Affiche les figures en 1..max_cols colonnes, centrées si < max_cols,
+    en donnant une clé unique à chaque chart pour éviter StreamlitDuplicateElementId.
+    """
     valid = [f for f in figs if f is not None]
     if not valid:
         return
@@ -211,7 +213,12 @@ def render_fig_grid(figs: list[go.Figure | None], max_cols: int = 3):
     if n == 1:
         cols = st.columns([1, 2, 1])
         with cols[1]:
-            st.plotly_chart(valid[0], use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(
+                valid[0],
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key=f"{key_prefix}-0",
+            )
         return
 
     # 2 figures : 2 colonnes, sinon jusqu'à 3 colonnes
@@ -224,8 +231,14 @@ def render_fig_grid(figs: list[go.Figure | None], max_cols: int = 3):
             if idx >= n:
                 break
             with cols[c]:
-                st.plotly_chart(valid[idx], use_container_width=True, config={"displayModeBar": False})
+                st.plotly_chart(
+                    valid[idx],
+                    use_container_width=True,
+                    config={"displayModeBar": False},
+                    key=f"{key_prefix}-{idx}",
+                )
             idx += 1
+
 
 
 # ================== TAB ==================
@@ -339,7 +352,8 @@ def run_litasco_supply_tab():
                     if s.isna().all() or (s == 0).all():
                         continue
                     figs_ref.append(seasonality_figure(s, f"{country} / {ref['Refinery']} / {product}"))
-                render_fig_grid(figs_ref, max_cols=3)
+                render_fig_grid(figs_ref, max_cols=3, key_prefix=f"ref-{country}-{ref['Refinery']}")
+
 
         st.subheader("Country totals")
         figs_ctry = []
@@ -347,18 +361,19 @@ def run_litasco_supply_tab():
             if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0):
                 continue
             figs_ctry.append(seasonality_figure(s, f"{country} / {product}"))
-        render_fig_grid(figs_ctry, max_cols=3)
+        render_fig_grid(figs_ctry, max_cols=3, key_prefix=f"ctry-{country}")
 
 
         st.markdown("---")
 
-        st.header(f"{region} — Totaux régionaux")
-        figs_reg = []
-        for product, s in sorted(totals_product.items(), key=lambda kv: kv[0].lower()):
-            if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0):
-                continue
-            figs_reg.append(seasonality_figure(s, f"{region} Total / {product}"))
-        render_fig_grid(figs_reg, max_cols=3)
+    # --- Totaux régionaux (une seule fois, hors de la boucle pays)
+    st.header(f"{region} — Totaux régionaux")
+    figs_reg = []
+    for product, s in sorted(totals_product.items(), key=lambda kv: kv[0].lower()):
+        if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0):
+            continue
+        figs_reg.append(seasonality_figure(s, f"{region} Total / {product}"))
+    render_fig_grid(figs_reg, max_cols=3, key_prefix=f"region-{region}")
 
 
     # 5) Résumé
