@@ -1,23 +1,22 @@
 # balances/litasco_supply_tab.py
 # -*- coding: utf-8 -*-
-import os, glob, platform
+import os
+import platform
 from datetime import datetime
+from pathlib import Path
+import re
+
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
-from pathlib import Path
 
-# --------- Dossier par défaut pour les fichiers Runs (UNC) ---------
-DEFAULT_LITASCO_RUNS_DIR = r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\Litasco balances\Litasco supply"
-
-# Fallback local (comme "Bunker diff/…") pour les environnements non-Windows
+# ---------------------- Dossier local (type "Bunker diff/…") ----------------------
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_LITASCO_DIR = REPO_ROOT / "Litasco balances" / "Litasco supply"
-LOCAL_LITASCO_DIR.mkdir(parents=True, exist_ok=True)  # ok si déjà présent
+LOCAL_LITASCO_DIR.mkdir(parents=True, exist_ok=True)
 
-# ========== PARAMETRISATION REGION ==========
-# Dictionnaires par région. NWE est rempli; MED est un placeholder prêt à être complété.
+# ---------------------- Paramétrage régions ----------------------
 REFINERIES_BY_REGION = {
     "NWE": {
         "Belgium": [
@@ -63,57 +62,59 @@ REFINERIES_BY_REGION = {
         ],
     },
     "MED": {
-        # 👉 à compléter plus tard (capacités & rendements) au même format que NWE.
+        # 👉 prêt à remplir plus tard (même structure que NWE)
     }
 }
 
-# --------- Constantes / style ---------
+# ---------------------- Constantes & style ----------------------
 KBD_TO_KT = 6.35
 BAND_START, BAND_END = 2020, 2024
 SPECIAL_COLORS = {2026: "red", 2025: "black", 2024: "green"}
 MONTH_TICKS = list(range(1, 13))
 MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
-# ================== IO HELPERS ==================
-def pick_runs_path(explicit_path: str, runs_dir: str, pattern: str) -> str:
+# ---------------------- IO helpers ----------------------
+DATE_IN_NAME = re.compile(r"(\d{2}\.\d{2}\.\d{4})")  # ex: 09.16.2025
+
+def _parse_date_from_name(p: Path):
+    m = DATE_IN_NAME.search(p.name)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%m.%d.%Y")
+    except Exception:
+        return None
+
+def pick_runs_path(explicit_path: str, pattern: str) -> str:
     """
-    1) Si explicit_path pointe vers un fichier existant -> return.
-    2) Sinon, on tente le dossier UNC (Windows uniquement).
-    3) Sinon, on tente le dossier local du repo: 'Litasco balances/Litasco supply'.
-    Retourne le fichier le plus récent qui matche pattern.
+    Priorité :
+      1) chemin explicite si fourni,
+      2) sinon dernier fichier LOCAL dans 'Litasco balances/Litasco supply'
+         qui matche `pattern` (tri d'abord par date dans le nom, sinon par mtime).
     """
-    # 1) Chemin explicite
-    if explicit_path and os.path.isfile(explicit_path):
-        return explicit_path
+    # 1) chemin explicite
+    if explicit_path:
+        p = Path(explicit_path)
+        if p.is_file():
+            return str(p)
 
-    candidates = []
-
-    # 2) Dossier UNC (seulement si Windows)
-    if platform.system() == "Windows":
-        unc_dir = runs_dir.replace("\\", "/")
-        candidates.append(os.path.join(unc_dir, pattern))
-
-    # 3) Fallback local relatif au repo
-    local_dir = str(LOCAL_LITASCO_DIR).replace("\\", "/")
-    candidates.append(os.path.join(local_dir, pattern))
-
-    # Recherche
-    matched = []
-    for pat in candidates:
-        matched.extend(glob.glob(pat))
-
-    if not matched:
+    # 2) recherche locale
+    files = sorted(LOCAL_LITASCO_DIR.glob(pattern))
+    if not files:
         raise FileNotFoundError(
-            "Aucun fichier 'Runs' trouvé.\n"
-            f"- Cherché UNC: {runs_dir}\\{pattern}\n"
-            f"- Cherché local: {LOCAL_LITASCO_DIR}\\{pattern}\n"
-            "➡️ Dépose le fichier via l'uploader ci-dessous OU copie-le dans "
-            "'Litasco balances/Litasco supply' au sein du repo."
+            "Aucun fichier 'Runs' trouvé en local.\n"
+            f"Place un fichier dans : {LOCAL_LITASCO_DIR}\n"
+            f"Pattern utilisé : {pattern}\n"
+            "💡 Tu peux aussi déposer le fichier via l’uploader ci-dessus."
         )
 
-    matched.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return matched[0]
+    dated = [(f, _parse_date_from_name(f)) for f in files]
+    if any(d is not None for _, d in dated):
+        files = [f for f, _ in sorted(dated, key=lambda x: (x[1] is None, x[1]), reverse=True)]
+    else:
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
+    return str(files[0])
 
 def load_runs(runs_path: str, sheet_name: str) -> pd.DataFrame:
     df = pd.read_excel(runs_path, sheet_name=sheet_name)
@@ -134,9 +135,8 @@ def nonempty_series(s: pd.Series | None) -> bool:
     vals = pd.to_numeric(s, errors="coerce")
     return not (vals.isna().all() or np.nan_to_num(vals.values).sum() == 0.0)
 
-# ================== PLOTTING (Plotly interactif) ==================
+# ---------------------- Plotly (interactif) ----------------------
 def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
-    """Graphique interactif: courbes par année + bande min/max (2020–2024)."""
     s = series.dropna()
     if s.empty or (s == 0).all():
         return None
@@ -145,14 +145,14 @@ def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
     df["Year"] = df.index.year
     df["Month"] = df.index.month
 
-    # Pivot: lignes=mois, colonnes=années
-    ym = (df.groupby(["Year","Month"])["kt"].mean().unstack(level=0).reindex(index=MONTH_TICKS))
+    ym = (df.groupby(["Year","Month"])["kt"].mean()
+            .unstack(level=0)
+            .reindex(index=MONTH_TICKS))
 
     years = [int(y) for y in ym.columns if pd.notna(y)]
     if not years:
         return None
 
-    # Bande 2020–2024
     band_years = [y for y in range(BAND_START, BAND_END + 1) if y in years]
     band_min = band_max = None
     if band_years:
@@ -162,27 +162,20 @@ def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
 
     fig = go.Figure()
 
-    # Bande grisée (si dispo)
     if band_years and band_min.notna().any() and band_max.notna().any():
-        fig.add_trace(go.Scatter(
-            x=MONTH_TICKS, y=band_min.values,
-            mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"
-        ))
-        fig.add_trace(go.Scatter(
-            x=MONTH_TICKS, y=band_max.values,
-            mode="lines", line=dict(width=0),
-            fill="tonexty", fillcolor="rgba(128,128,128,0.20)",
-            name=f"{BAND_START}–{BAND_END} range", hoverinfo="skip"
-        ))
+        fig.add_trace(go.Scatter(x=MONTH_TICKS, y=band_min.values,
+                                 mode="lines", line=dict(width=0),
+                                 showlegend=False, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=MONTH_TICKS, y=band_max.values,
+                                 mode="lines", line=dict(width=0),
+                                 fill="tonexty", fillcolor="rgba(128,128,128,0.20)",
+                                 name=f"{BAND_START}–{BAND_END} range", hoverinfo="skip"))
 
-    # Courbes par année
     for y in sorted(years):
         line = ym[y]
         color = SPECIAL_COLORS.get(y, None)
         fig.add_trace(go.Scatter(
-            x=MONTH_TICKS, y=line.values,
-            mode="lines+markers",
-            name=str(y),
+            x=MONTH_TICKS, y=line.values, mode="lines+markers", name=str(y),
             line=dict(width=2 if y in SPECIAL_COLORS else 1.3, color=color),
             opacity=1.0 if y in SPECIAL_COLORS else 0.6
         ))
@@ -197,64 +190,45 @@ def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
     )
     return fig
 
-# ================== MAIN TAB RENDERER ==================
+# ---------------------- MAIN TAB RENDERER ----------------------
 def run_litasco_supply_tab():
     st.subheader("Litasco supply — seasonality (interactive)")
 
-    # ---- UI
-    c1, c2, c3 = st.columns([1,1,1])
+    c1, c2 = st.columns([1,1])
     with c1:
         region = st.selectbox("Région", ["NWE", "MED"], index=0, help="MED prêt pour plus tard")
     with c2:
         runs_sheet = st.text_input("Onglet Excel (sheet)", value="NWE" if region == "NWE" else "MED")
-    with c3:
-        # bouton pour re-générer
-        pass
 
-    # Chemins d'entrée (style "Bunker diff/…")
+    # Chemins d'entrée (LOCAL au repo)
     runs_file_explicit = st.text_input(
-        "Fichier Runs (chemin complet facultatif)",
-        value=""  # vide => on cherche auto
-    )
-    runs_dir = st.text_input(
-        "Dossier des Runs (UNC Windows)",
-        value=DEFAULT_LITASCO_RUNS_DIR
+        "Fichier Runs (chemin complet facultatif — sinon on prend le plus récent en LOCAL)",
+        value=""
     )
     runs_pattern = st.text_input(
-        "Pattern de fichier",
+        "Pattern de fichier (local au repo)",
         value="Europe Runs Recap*.xlsx"
     )
+    st.caption(f"Dossier local utilisé : {LOCAL_LITASCO_DIR}")
 
-    st.caption(f"Fallback local (repo): {LOCAL_LITASCO_DIR}")
-
-    # Uploader (si tu ne peux pas accéder au UNC)
+    # Uploader : dépose le .xlsx ici (il sera sauvegardé dans le dossier local ci-dessus)
     uploaded = st.file_uploader("…ou dépose un fichier .xlsx ici", type=["xlsx"])
     if uploaded is not None:
-        # On sauvegarde dans le dossier local du repo et on l'utilisera comme 'explicit_path'
         save_path = LOCAL_LITASCO_DIR / uploaded.name
         with open(save_path, "wb") as f:
             f.write(uploaded.getbuffer())
         runs_file_explicit = str(save_path)
-        st.success(f"Fichier uploadé: {save_path.name}")
-
-
-    # Alerte UNC si non-Windows
-    if platform.system() != "Windows" and (runs_dir.startswith("\\") or runs_dir.startswith("//")):
-        st.warning(
-            "Chemin réseau UNC détecté sur un runtime non-Windows. "
-            "Monte le partage réseau ou fournis un fichier local via 'Fichier Runs'."
-        )
+        st.success(f"Fichier uploadé : {save_path.name}")
 
     st.markdown("---")
-    go = st.button("Générer les graphiques")
-
-    if not go:
-        st.info("Renseigne les options ci-dessus puis clique **Générer les graphiques**.")
+    btn_generate = st.button("Générer les graphiques")
+    if not btn_generate:
+        st.info("Choisis ta région et tes fichiers, puis clique **Générer les graphiques**.")
         return
 
-    # ---- Chargement runs
+    # Chargement runs
     try:
-        runs_path = pick_runs_path(runs_file_explicit, runs_dir, runs_pattern)
+        runs_path = pick_runs_path(runs_file_explicit, runs_pattern)
         st.success(f"Fichier Runs utilisé : **{os.path.basename(runs_path)}**")
         st.caption(runs_path)
     except Exception as e:
@@ -275,12 +249,11 @@ def run_litasco_supply_tab():
     target_countries = list(REFINERIES.keys())
     all_products = sorted({prod for plist in REFINERIES.values() for r in plist for prod in r["Yields"].keys()})
 
-    # Structures pour affichage
-    refinery_product: dict[tuple[str, str], pd.DataFrame] = {}  # (country, refinery) -> df produits
+    refinery_product: dict[tuple[str, str], pd.DataFrame] = {}
     country_product: dict[str, dict[str, pd.Series]] = {c: {} for c in target_countries}
     totals_product: dict[str, pd.Series | None] = {p: None for p in all_products}
 
-    # ---- Calculs (refinery -> country -> region)
+    # Calculs
     for country in target_countries:
         runs_c = series_for_country(runs_df, country)
         if not nonempty_series(runs_c):
@@ -291,9 +264,8 @@ def run_litasco_supply_tab():
         if total_cap == 0:
             continue
 
-        util = runs_c / total_cap  # utilisation (kbd/kbd)
+        util = runs_c / total_cap  # utilisation
 
-        # init pays×produit
         for p in all_products:
             country_product[country][p] = None
 
@@ -305,54 +277,39 @@ def run_litasco_supply_tab():
                 series_kt.name = prod
                 prod_cols[prod] = series_kt
 
-                # accumulate pays×produit
                 country_product[country][prod] = (
                     series_kt.copy() if country_product[country][prod] is None
                     else country_product[country][prod].add(series_kt, fill_value=0.0)
                 )
-
-                # accumulate région×produit
                 totals_product[prod] = (
                     series_kt.copy() if totals_product[prod] is None
                     else totals_product[prod].add(series_kt, fill_value=0.0)
                 )
 
-            # compléter colonnes manquantes par 0
             for p in all_products:
                 if p not in prod_cols:
-                    s0 = pd.Series(0.0, index=Ri.index)
-                    s0.name = p
-                    prod_cols[p] = s0
+                    prod_cols[p] = pd.Series(0.0, index=Ri.index, name=p)
 
             df_ref = pd.DataFrame(prod_cols, index=Ri.index)[all_products]
             refinery_product[(country, r["Refinery"])] = df_ref
 
     st.success("Graphiques calculés. Affichage…")
 
-    # ---- AFFICHAGE COMME DANS LE MAIL ----
-    # 1) Par pays — raffineries (grilles 3 par ligne), puis totaux pays
+    # AFFICHAGE : pays -> raffineries -> totaux pays
     for country in sorted(target_countries):
-        # ne rien afficher si le pays n'a pas de données
-        has_any = any(
-            (country, ref["Refinery"]) in refinery_product
-            for ref in REFINERIES.get(country, [])
-        )
+        has_any = any((country, ref["Refinery"]) in refinery_product for ref in REFINERIES.get(country, []))
         if not has_any:
             continue
 
         st.header(country)
 
-        # Raffineries
         with st.expander("Refineries", expanded=False):
-            # boucle par raffinerie de ce pays
-            refs = REFINERIES[country]
-            for ref in refs:
+            for ref in REFINERIES[country]:
                 key = (country, ref["Refinery"])
                 if key not in refinery_product:
                     continue
                 df_ref = refinery_product[key]
                 st.subheader(f"{ref['Refinery']}")
-                # grille 3 par ligne
                 cols = st.columns(3)
                 col_idx = 0
                 for product in df_ref.columns:
@@ -365,7 +322,6 @@ def run_litasco_supply_tab():
                             st.plotly_chart(fig, use_container_width=True)
                         col_idx = (col_idx + 1) % 3
 
-        # Totaux pays × produit
         st.subheader("Country totals")
         cols = st.columns(3)
         col_idx = 0
@@ -380,7 +336,7 @@ def run_litasco_supply_tab():
 
         st.markdown("---")
 
-    # 2) Totaux régionaux
+    # Totaux régionaux
     st.header(f"{region} — Totaux régionaux")
     cols = st.columns(3)
     col_idx = 0
@@ -393,44 +349,35 @@ def run_litasco_supply_tab():
                 st.plotly_chart(fig, use_container_width=True)
             col_idx = (col_idx + 1) % 3
 
-    # ---- Export CSV résumé (en mémoire) ----
+    # Résumé CSV
     today = datetime.now().strftime("%Y-%m-%d")
-    summary_rows = []
-    # pays
+    rows = []
     for country, prod_map in country_product.items():
         for product, s in prod_map.items():
             if s is None:
                 continue
-            summary_rows.append({
-                "Region": region,
-                "Country": country,
-                "Product": product,
+            rows.append({
+                "Region": region, "Country": country, "Product": product,
                 "Avg_kt": round(float(pd.to_numeric(s, errors="coerce").mean()), 2),
                 "Total_kt": round(float(pd.to_numeric(s, errors="coerce").sum()), 2),
             })
-    # région
     for product, s in totals_product.items():
         if s is None:
             continue
-        summary_rows.append({
-            "Region": region,
-            "Country": f"{region} Total",
-            "Product": product,
+        rows.append({
+            "Region": region, "Country": f"{region} Total", "Product": product,
             "Avg_kt": round(float(pd.to_numeric(s, errors="coerce").mean()), 2),
             "Total_kt": round(float(pd.to_numeric(s, errors="coerce").sum()), 2),
         })
 
-    if summary_rows:
-        df_summary = pd.DataFrame(summary_rows).sort_values(["Region","Country","Product"]).reset_index(drop=True)
+    if rows:
+        df_summary = pd.DataFrame(rows).sort_values(["Region","Country","Product"]).reset_index(drop=True)
         st.subheader("Résumé (tableau)")
         st.dataframe(df_summary, use_container_width=True)
-
         csv_bytes = df_summary.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-        st.download_button(
-            "Télécharger le CSV résumé",
-            data=csv_bytes,
-            file_name=f"Summary_{region}_{today}.csv",
-            mime="text/csv"
-        )
+        st.download_button("Télécharger le CSV résumé",
+                           data=csv_bytes,
+                           file_name=f"Summary_{region}_{today}.csv",
+                           mime="text/csv")
     else:
         st.info("Aucune donnée non-nulle à résumer.")
