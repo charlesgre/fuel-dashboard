@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, glob, platform
+import os, glob, platform, re
 from datetime import datetime
 from pathlib import Path
 import pandas as pd
@@ -7,9 +7,11 @@ import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 
-# ---------- Chemin & pattern par défaut ----------
+# ---------- Dossiers ----------
 DEFAULT_LITASCO_RUNS_DIR = r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\Litasco balances\Litasco supply"
-DEFAULT_PATTERN = "Europe Runs Recap*.xlsx"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_LITASCO_DIR = REPO_ROOT / "Litasco balances" / "Litasco supply"
+LOCAL_LITASCO_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Paramétrage raffineries ----------
 REFINERIES_BY_REGION = {
@@ -42,23 +44,15 @@ REFINERIES_BY_REGION = {
             {"Refinery": "Frederica",     "Capacity": 75,  "Yields": {"VLSFO": 0.13}},
             {"Refinery": "Kalundborg",    "Capacity": 105, "Yields": {"LSFO": 0.12}},
         ],
-        "Finland": [
-            {"Refinery": "Porvoo",        "Capacity": 96,  "Yields": {"VGO": 0.03}},
-        ],
-        "Ireland": [
-            {"Refinery": "Whitegate",     "Capacity": 75,  "Yields": {"LSSR": 0.16}},
-        ],
-        "Lithuania": [
-            {"Refinery": "Mazeikiai",     "Capacity": 200, "Yields": {"HSFO": 0.08}},
-        ],
+        "Finland": [{"Refinery": "Porvoo", "Capacity": 96, "Yields": {"VGO": 0.03}}],
+        "Ireland": [{"Refinery": "Whitegate", "Capacity": 75, "Yields": {"LSSR": 0.16}}],
+        "Lithuania": [{"Refinery": "Mazeikiai", "Capacity": 200, "Yields": {"HSFO": 0.08}}],
         "Poland": [
-            {"Refinery": "Gdansk",        "Capacity": 210, "Yields": {"HSFO": 0.02}},
-            {"Refinery": "Plock",         "Capacity": 360, "Yields": {"HSFO": 0.02}},
+            {"Refinery": "Gdansk", "Capacity": 210, "Yields": {"HSFO": 0.02}},
+            {"Refinery": "Plock",  "Capacity": 360, "Yields": {"HSFO": 0.02}},
         ],
     },
-    "MED": {
-        # à compléter plus tard
-    }
+    "MED": {}
 }
 
 # ---------- Constantes ----------
@@ -68,24 +62,60 @@ SPECIAL_COLORS = {2026: "red", 2025: "black", 2024: "green"}
 MONTH_TICKS = list(range(1, 13))
 MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
-# ================== IO ==================
-def pick_latest_runs_path(runs_dir: str, pattern: str) -> str:
-    """
-    Retourne le fichier le plus récent qui matche 'pattern' dans 'runs_dir'.
-    Supporte automatiquement les chemins UNC (remplacement \\ -> / pour glob).
-    """
-    if not runs_dir:
-        raise FileNotFoundError("Dossier Runs non fourni.")
+# ================== IO helpers ==================
+_DATE_PAT = re.compile(r"(\d{2}[.\-]\d{2}[.\-]\d{4}|\d{8}|\d{4}-\d{2}-\d{2})")
 
-    # glob préfère les slashs
-    p_dir = runs_dir.replace("\\", "/")
-    candidates = glob.glob(os.path.join(p_dir, pattern))
+def _parse_date_from_name(p: Path):
+    m = _DATE_PAT.search(p.name)
+    if not m:
+        return None
+    s = m.group(1)
+    for fmt in ("%m.%d.%Y", "%d.%m.%Y", "%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
+    return None
+
+def _list_matches(dir_path: Path, patterns: list[str]) -> list[Path]:
+    out: list[Path] = []
+    for pat in patterns:
+        out.extend(dir_path.glob(pat))
+    return list({p.resolve() for p in out if p.is_file()})
+
+def pick_latest_runs_path(runs_dir: str) -> str:
+    """
+    Choisit automatiquement le dernier Excel :
+      1) dans runs_dir (UNC),
+      2) sinon dans LOCAL_LITASCO_DIR (copie locale).
+    Try patterns: 'Europe Runs Recap*.xlsx' puis '*.xlsx'.
+    Tri: date dans le nom > date de modification.
+    """
+    patterns = ["Europe Runs Recap*.xlsx", "*.xlsx"]
+
+    candidates: list[Path] = []
+    # 1) UNC (si fourni)
+    if runs_dir:
+        dir_unc = Path(runs_dir)
+        candidates += _list_matches(dir_unc, patterns)
+
+    # 2) Fallback local du repo
+    candidates += _list_matches(LOCAL_LITASCO_DIR, patterns)
+
     if not candidates:
         raise FileNotFoundError(
-            f"Aucun fichier trouvé dans {runs_dir} avec le pattern {pattern}."
+            f"Aucun fichier Excel trouvé dans:\n"
+            f"- {runs_dir}\n- {LOCAL_LITASCO_DIR}\n"
+            f"(patterns testés: {', '.join(patterns)})"
         )
-    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return candidates[0]
+
+    # Trier par date dans le nom (si dispo), sinon mtime
+    scored = []
+    for p in candidates:
+        d = _parse_date_from_name(p)
+        scored.append((p, d if d is not None else datetime.fromtimestamp(p.stat().st_mtime)))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return str(scored[0][0])
 
 def load_runs(runs_path: str, sheet_name: str) -> pd.DataFrame:
     df = pd.read_excel(runs_path, sheet_name=sheet_name)
@@ -169,28 +199,29 @@ def run_litasco_supply_tab():
     with c2:
         runs_sheet = st.text_input("Onglet Excel (sheet)", value=("NWE" if region == "NWE" else "MED"))
 
-    # Tu peux changer, mais par défaut on prend toujours le dernier :
-    runs_dir = st.text_input("Dossier des Runs", value=DEFAULT_LITASCO_RUNS_DIR)
-    runs_pattern = st.text_input("Pattern des fichiers", value=DEFAULT_PATTERN)
+    runs_dir = st.text_input("Dossier des Runs (UNC ou vide pour utiliser le dossier local du repo)",
+                             value=DEFAULT_LITASCO_RUNS_DIR)
 
     if platform.system() != "Windows" and (runs_dir.startswith("\\") or runs_dir.startswith("//")):
-        st.warning("Chemin UNC détecté sur un runtime non-Windows. Assure-toi que le partage réseau est monté.")
+        st.warning("Chemin UNC détecté sur un runtime non-Windows. Le code basculera sur le dossier local du repo si le partage n’est pas monté.")
+
+    st.caption(f"Dossier local du repo : {LOCAL_LITASCO_DIR}")
 
     st.markdown("---")
     if not st.button("Générer les graphiques"):
         st.info("Clique sur **Générer les graphiques**.")
         return
 
-    # 1) Trouver le dernier fichier
+    # 1) Fichier: prend automatiquement le plus récent
     try:
-        runs_path = pick_latest_runs_path(runs_dir, runs_pattern)
-        st.success(f"Fichier sélectionné : **{os.path.basename(runs_path)}**")
+        runs_path = pick_latest_runs_path(runs_dir)
+        st.success(f"Fichier sélectionné automatiquement : **{os.path.basename(runs_path)}**")
         st.caption(runs_path)
     except Exception as e:
-        st.error(f"Impossible de trouver le fichier : {e}")
+        st.error(f"Impossible de trouver un Excel : {e}")
         return
 
-    # 2) Charger la feuille
+    # 2) Lecture
     try:
         runs_df = load_runs(runs_path, runs_sheet)
     except Exception as e:
@@ -199,7 +230,7 @@ def run_litasco_supply_tab():
 
     REFINERIES = REFINERIES_BY_REGION.get(region, {})
     if not REFINERIES:
-        st.warning(f"Aucune raffinerie configurée pour {region} (à compléter).")
+        st.warning(f"Aucune raffinerie configurée pour {region}.")
         return
 
     target_countries = list(REFINERIES.keys())
@@ -295,7 +326,7 @@ def run_litasco_supply_tab():
             with cols[ci]: st.plotly_chart(fig, use_container_width=True)
             ci = (ci + 1) % 3
 
-    # 5) Résumé téléchargeable
+    # 5) Résumé
     today = datetime.now().strftime("%Y-%m-%d")
     rows = []
     for country, prod_map in country_product.items():
