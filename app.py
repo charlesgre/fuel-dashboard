@@ -179,7 +179,7 @@ with tab3:
 
 # === TAB 4: BALANCES ===
 with tab4:
-    st.header("Balances")
+    st.header("Balances FGE/EA/Litasco")
 
     # Sous-onglets : FGE/EA existant + nouveau 'Litasco supply'
     subtab_fge_ea, subtab_litasco = st.tabs(["FGE / EA", "Litasco supply"])
