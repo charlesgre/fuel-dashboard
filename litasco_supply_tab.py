@@ -1,22 +1,17 @@
-# balances/litasco_supply_tab.py
 # -*- coding: utf-8 -*-
-import os
-import platform
+import os, glob, platform
 from datetime import datetime
 from pathlib import Path
-import re
-
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 
-# ---------------------- Dossier local (type "Bunker diff/…") ----------------------
-REPO_ROOT = Path(__file__).resolve().parents[1]
-LOCAL_LITASCO_DIR = REPO_ROOT / "Litasco balances" / "Litasco supply"
-LOCAL_LITASCO_DIR.mkdir(parents=True, exist_ok=True)
+# ---------- Chemin & pattern par défaut ----------
+DEFAULT_LITASCO_RUNS_DIR = r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\Litasco balances\Litasco supply"
+DEFAULT_PATTERN = "Europe Runs Recap*.xlsx"
 
-# ---------------------- Paramétrage régions ----------------------
+# ---------- Paramétrage raffineries ----------
 REFINERIES_BY_REGION = {
     "NWE": {
         "Belgium": [
@@ -62,59 +57,35 @@ REFINERIES_BY_REGION = {
         ],
     },
     "MED": {
-        # 👉 prêt à remplir plus tard (même structure que NWE)
+        # à compléter plus tard
     }
 }
 
-# ---------------------- Constantes & style ----------------------
+# ---------- Constantes ----------
 KBD_TO_KT = 6.35
 BAND_START, BAND_END = 2020, 2024
 SPECIAL_COLORS = {2026: "red", 2025: "black", 2024: "green"}
 MONTH_TICKS = list(range(1, 13))
 MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
-# ---------------------- IO helpers ----------------------
-DATE_IN_NAME = re.compile(r"(\d{2}\.\d{2}\.\d{4})")  # ex: 09.16.2025
-
-def _parse_date_from_name(p: Path):
-    m = DATE_IN_NAME.search(p.name)
-    if not m:
-        return None
-    try:
-        return datetime.strptime(m.group(1), "%m.%d.%Y")
-    except Exception:
-        return None
-
-def pick_runs_path(explicit_path: str, pattern: str) -> str:
+# ================== IO ==================
+def pick_latest_runs_path(runs_dir: str, pattern: str) -> str:
     """
-    Priorité :
-      1) chemin explicite si fourni,
-      2) sinon dernier fichier LOCAL dans 'Litasco balances/Litasco supply'
-         qui matche `pattern` (tri d'abord par date dans le nom, sinon par mtime).
+    Retourne le fichier le plus récent qui matche 'pattern' dans 'runs_dir'.
+    Supporte automatiquement les chemins UNC (remplacement \\ -> / pour glob).
     """
-    # 1) chemin explicite
-    if explicit_path:
-        p = Path(explicit_path)
-        if p.is_file():
-            return str(p)
+    if not runs_dir:
+        raise FileNotFoundError("Dossier Runs non fourni.")
 
-    # 2) recherche locale
-    files = sorted(LOCAL_LITASCO_DIR.glob(pattern))
-    if not files:
+    # glob préfère les slashs
+    p_dir = runs_dir.replace("\\", "/")
+    candidates = glob.glob(os.path.join(p_dir, pattern))
+    if not candidates:
         raise FileNotFoundError(
-            "Aucun fichier 'Runs' trouvé en local.\n"
-            f"Place un fichier dans : {LOCAL_LITASCO_DIR}\n"
-            f"Pattern utilisé : {pattern}\n"
-            "💡 Tu peux aussi déposer le fichier via l’uploader ci-dessus."
+            f"Aucun fichier trouvé dans {runs_dir} avec le pattern {pattern}."
         )
-
-    dated = [(f, _parse_date_from_name(f)) for f in files]
-    if any(d is not None for _, d in dated):
-        files = [f for f, _ in sorted(dated, key=lambda x: (x[1] is None, x[1]), reverse=True)]
-    else:
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
-    return str(files[0])
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return candidates[0]
 
 def load_runs(runs_path: str, sheet_name: str) -> pd.DataFrame:
     df = pd.read_excel(runs_path, sheet_name=sheet_name)
@@ -122,7 +93,7 @@ def load_runs(runs_path: str, sheet_name: str) -> pd.DataFrame:
     df["Date"] = pd.to_datetime(df["Date"])
     return df.set_index("Date")
 
-def series_for_country(runs_df: pd.DataFrame, country: str) -> pd.Series | None:
+def series_for_country(runs_df: pd.DataFrame, country: str):
     if country in runs_df.columns:
         return runs_df[country]
     if country == "United Kingdom" and "UK" in runs_df.columns:
@@ -130,12 +101,11 @@ def series_for_country(runs_df: pd.DataFrame, country: str) -> pd.Series | None:
     return None
 
 def nonempty_series(s: pd.Series | None) -> bool:
-    if s is None:
-        return False
+    if s is None: return False
     vals = pd.to_numeric(s, errors="coerce")
     return not (vals.isna().all() or np.nan_to_num(vals.values).sum() == 0.0)
 
-# ---------------------- Plotly (interactif) ----------------------
+# ================== Plotly ==================
 def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
     s = series.dropna()
     if s.empty or (s == 0).all():
@@ -144,10 +114,8 @@ def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
     df = pd.DataFrame({"kt": s})
     df["Year"] = df.index.year
     df["Month"] = df.index.month
-
     ym = (df.groupby(["Year","Month"])["kt"].mean()
-            .unstack(level=0)
-            .reindex(index=MONTH_TICKS))
+            .unstack(level=0).reindex(index=MONTH_TICKS))
 
     years = [int(y) for y in ym.columns if pd.notna(y)]
     if not years:
@@ -169,14 +137,15 @@ def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
         fig.add_trace(go.Scatter(x=MONTH_TICKS, y=band_max.values,
                                  mode="lines", line=dict(width=0),
                                  fill="tonexty", fillcolor="rgba(128,128,128,0.20)",
-                                 name=f"{BAND_START}–{BAND_END} range", hoverinfo="skip"))
+                                 name=f"{BAND_START}–{BAND_END} range",
+                                 hoverinfo="skip"))
 
     for y in sorted(years):
         line = ym[y]
         color = SPECIAL_COLORS.get(y, None)
         fig.add_trace(go.Scatter(
-            x=MONTH_TICKS, y=line.values, mode="lines+markers", name=str(y),
-            line=dict(width=2 if y in SPECIAL_COLORS else 1.3, color=color),
+            x=MONTH_TICKS, y=line.values, mode="lines+markers",
+            name=str(y), line=dict(width=2 if y in SPECIAL_COLORS else 1.3, color=color),
             opacity=1.0 if y in SPECIAL_COLORS else 0.6
         ))
 
@@ -190,51 +159,38 @@ def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
     )
     return fig
 
-# ---------------------- MAIN TAB RENDERER ----------------------
+# ================== TAB ==================
 def run_litasco_supply_tab():
     st.subheader("Litasco supply — seasonality (interactive)")
 
-    c1, c2 = st.columns([1,1])
+    c1, c2 = st.columns([1, 1])
     with c1:
-        region = st.selectbox("Région", ["NWE", "MED"], index=0, help="MED prêt pour plus tard")
+        region = st.selectbox("Région", ["NWE", "MED"], index=0)
     with c2:
-        runs_sheet = st.text_input("Onglet Excel (sheet)", value="NWE" if region == "NWE" else "MED")
+        runs_sheet = st.text_input("Onglet Excel (sheet)", value=("NWE" if region == "NWE" else "MED"))
 
-    # Chemins d'entrée (LOCAL au repo)
-    runs_file_explicit = st.text_input(
-        "Fichier Runs (chemin complet facultatif — sinon on prend le plus récent en LOCAL)",
-        value=""
-    )
-    runs_pattern = st.text_input(
-        "Pattern de fichier (local au repo)",
-        value="Europe Runs Recap*.xlsx"
-    )
-    st.caption(f"Dossier local utilisé : {LOCAL_LITASCO_DIR}")
+    # Tu peux changer, mais par défaut on prend toujours le dernier :
+    runs_dir = st.text_input("Dossier des Runs", value=DEFAULT_LITASCO_RUNS_DIR)
+    runs_pattern = st.text_input("Pattern des fichiers", value=DEFAULT_PATTERN)
 
-    # Uploader : dépose le .xlsx ici (il sera sauvegardé dans le dossier local ci-dessus)
-    uploaded = st.file_uploader("…ou dépose un fichier .xlsx ici", type=["xlsx"])
-    if uploaded is not None:
-        save_path = LOCAL_LITASCO_DIR / uploaded.name
-        with open(save_path, "wb") as f:
-            f.write(uploaded.getbuffer())
-        runs_file_explicit = str(save_path)
-        st.success(f"Fichier uploadé : {save_path.name}")
+    if platform.system() != "Windows" and (runs_dir.startswith("\\") or runs_dir.startswith("//")):
+        st.warning("Chemin UNC détecté sur un runtime non-Windows. Assure-toi que le partage réseau est monté.")
 
     st.markdown("---")
-    btn_generate = st.button("Générer les graphiques")
-    if not btn_generate:
-        st.info("Choisis ta région et tes fichiers, puis clique **Générer les graphiques**.")
+    if not st.button("Générer les graphiques"):
+        st.info("Clique sur **Générer les graphiques**.")
         return
 
-    # Chargement runs
+    # 1) Trouver le dernier fichier
     try:
-        runs_path = pick_runs_path(runs_file_explicit, runs_pattern)
-        st.success(f"Fichier Runs utilisé : **{os.path.basename(runs_path)}**")
+        runs_path = pick_latest_runs_path(runs_dir, runs_pattern)
+        st.success(f"Fichier sélectionné : **{os.path.basename(runs_path)}**")
         st.caption(runs_path)
     except Exception as e:
-        st.error(f"Erreur Runs : {e}")
+        st.error(f"Impossible de trouver le fichier : {e}")
         return
 
+    # 2) Charger la feuille
     try:
         runs_df = load_runs(runs_path, runs_sheet)
     except Exception as e:
@@ -247,13 +203,13 @@ def run_litasco_supply_tab():
         return
 
     target_countries = list(REFINERIES.keys())
-    all_products = sorted({prod for plist in REFINERIES.values() for r in plist for prod in r["Yields"].keys()})
+    all_products = sorted({p for plist in REFINERIES.values() for r in plist for p in r["Yields"].keys()})
 
     refinery_product: dict[tuple[str, str], pd.DataFrame] = {}
     country_product: dict[str, dict[str, pd.Series]] = {c: {} for c in target_countries}
     totals_product: dict[str, pd.Series | None] = {p: None for p in all_products}
 
-    # Calculs
+    # 3) Calculs
     for country in target_countries:
         runs_c = series_for_country(runs_df, country)
         if not nonempty_series(runs_c):
@@ -264,26 +220,26 @@ def run_litasco_supply_tab():
         if total_cap == 0:
             continue
 
-        util = runs_c / total_cap  # utilisation
+        util = runs_c / total_cap
 
         for p in all_products:
             country_product[country][p] = None
 
         for r in refs:
-            Ri = r["Capacity"] * util  # kbd
+            Ri = r["Capacity"] * util
             prod_cols = {}
             for prod, y in r["Yields"].items():
-                series_kt = Ri * y * KBD_TO_KT  # kt
-                series_kt.name = prod
-                prod_cols[prod] = series_kt
+                s_kt = Ri * y * KBD_TO_KT
+                s_kt.name = prod
+                prod_cols[prod] = s_kt
 
                 country_product[country][prod] = (
-                    series_kt.copy() if country_product[country][prod] is None
-                    else country_product[country][prod].add(series_kt, fill_value=0.0)
+                    s_kt.copy() if country_product[country][prod] is None
+                    else country_product[country][prod].add(s_kt, fill_value=0.0)
                 )
                 totals_product[prod] = (
-                    series_kt.copy() if totals_product[prod] is None
-                    else totals_product[prod].add(series_kt, fill_value=0.0)
+                    s_kt.copy() if totals_product[prod] is None
+                    else totals_product[prod].add(s_kt, fill_value=0.0)
                 )
 
             for p in all_products:
@@ -293,12 +249,9 @@ def run_litasco_supply_tab():
             df_ref = pd.DataFrame(prod_cols, index=Ri.index)[all_products]
             refinery_product[(country, r["Refinery"])] = df_ref
 
-    st.success("Graphiques calculés. Affichage…")
-
-    # AFFICHAGE : pays -> raffineries -> totaux pays
+    # 4) Affichage
     for country in sorted(target_countries):
-        has_any = any((country, ref["Refinery"]) in refinery_product for ref in REFINERIES.get(country, []))
-        if not has_any:
+        if not any((country, ref["Refinery"]) in refinery_product for ref in REFINERIES.get(country, [])):
             continue
 
         st.header(country)
@@ -309,61 +262,52 @@ def run_litasco_supply_tab():
                 if key not in refinery_product:
                     continue
                 df_ref = refinery_product[key]
-                st.subheader(f"{ref['Refinery']}")
-                cols = st.columns(3)
-                col_idx = 0
+                st.subheader(ref["Refinery"])
+                cols = st.columns(3); ci = 0
                 for product in df_ref.columns:
                     s = df_ref[product]
                     if s.isna().all() or (s == 0).all():
                         continue
                     fig = seasonality_figure(s, f"{country} / {ref['Refinery']} / {product}")
                     if fig:
-                        with cols[col_idx]:
-                            st.plotly_chart(fig, use_container_width=True)
-                        col_idx = (col_idx + 1) % 3
+                        with cols[ci]: st.plotly_chart(fig, use_container_width=True)
+                        ci = (ci + 1) % 3
 
         st.subheader("Country totals")
-        cols = st.columns(3)
-        col_idx = 0
+        cols = st.columns(3); ci = 0
         for product, s in country_product[country].items():
             if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0):
                 continue
             fig = seasonality_figure(s, f"{country} / {product}")
             if fig:
-                with cols[col_idx]:
-                    st.plotly_chart(fig, use_container_width=True)
-                col_idx = (col_idx + 1) % 3
+                with cols[ci]: st.plotly_chart(fig, use_container_width=True)
+                ci = (ci + 1) % 3
 
         st.markdown("---")
 
-    # Totaux régionaux
     st.header(f"{region} — Totaux régionaux")
-    cols = st.columns(3)
-    col_idx = 0
+    cols = st.columns(3); ci = 0
     for product, s in sorted(totals_product.items(), key=lambda kv: kv[0].lower()):
         if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0):
             continue
         fig = seasonality_figure(s, f"{region} Total / {product}")
         if fig:
-            with cols[col_idx]:
-                st.plotly_chart(fig, use_container_width=True)
-            col_idx = (col_idx + 1) % 3
+            with cols[ci]: st.plotly_chart(fig, use_container_width=True)
+            ci = (ci + 1) % 3
 
-    # Résumé CSV
+    # 5) Résumé téléchargeable
     today = datetime.now().strftime("%Y-%m-%d")
     rows = []
     for country, prod_map in country_product.items():
         for product, s in prod_map.items():
-            if s is None:
-                continue
+            if s is None: continue
             rows.append({
                 "Region": region, "Country": country, "Product": product,
                 "Avg_kt": round(float(pd.to_numeric(s, errors="coerce").mean()), 2),
                 "Total_kt": round(float(pd.to_numeric(s, errors="coerce").sum()), 2),
             })
     for product, s in totals_product.items():
-        if s is None:
-            continue
+        if s is None: continue
         rows.append({
             "Region": region, "Country": f"{region} Total", "Product": product,
             "Avg_kt": round(float(pd.to_numeric(s, errors="coerce").mean()), 2),
@@ -374,10 +318,11 @@ def run_litasco_supply_tab():
         df_summary = pd.DataFrame(rows).sort_values(["Region","Country","Product"]).reset_index(drop=True)
         st.subheader("Résumé (tableau)")
         st.dataframe(df_summary, use_container_width=True)
-        csv_bytes = df_summary.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-        st.download_button("Télécharger le CSV résumé",
-                           data=csv_bytes,
-                           file_name=f"Summary_{region}_{today}.csv",
-                           mime="text/csv")
+        st.download_button(
+            "Télécharger le CSV résumé",
+            data=df_summary.to_csv(index=False, encoding="utf-8-sig"),
+            file_name=f"Summary_{region}_{today}.csv",
+            mime="text/csv"
+        )
     else:
         st.info("Aucune donnée non-nulle à résumer.")
