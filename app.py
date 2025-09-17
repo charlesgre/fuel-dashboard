@@ -17,6 +17,7 @@ from fuel_vs_gas import generate_fuel_vs_gas_tab
 from technical_analysis_tab import render as render_technical
 from arbs_tab import render as render_arbs
 from sg_imports_tab import render_sg_imports_tab
+from litasco_supply_tab import run_litasco_supply_tab
 
 # ---- Secrets / .env helpers (robust even if secrets.toml isn't auto-loaded) ----
 from typing import Optional
@@ -176,77 +177,90 @@ with tab3:
             st.plotly_chart(fig, use_container_width=True, key=f"saudi_cdd_{i}")
         col_idx = (col_idx + 1) % 3
 
-# === TAB 4: BALANCES (FGE / EA) ===
+# === TAB 4: BALANCES ===
 with tab4:
-    st.header("Seasonal Balances – FGE & EA")
-    source = st.radio("Source de données", ["FGE", "EA"], index=0, horizontal=True)
+    st.header("Balances")
 
-    if source == "FGE":
-        vlsfo_data, hsfo_data = load_fge_balances()
+    # Sous-onglets : FGE/EA existant + nouveau 'Litasco supply'
+    subtab_fge_ea, subtab_litasco = st.tabs(["FGE / EA", "Litasco supply"])
 
-        st.subheader("VLSFO (FGE)")
-        vlsfo_figs = plot_fge_balances(vlsfo_data, "VLSFO")
-        cols = st.columns(3); col_idx = 0
-        for i, (title, fig) in enumerate(vlsfo_figs.items()):
-            with cols[col_idx]:
-                st.plotly_chart(fig, use_container_width=True, key=f"fge_vlsfo_{i}")
-            col_idx = (col_idx + 1) % 3
+    # -------------------- FGE / EA (inchangé) --------------------
+    with subtab_fge_ea:
+        st.subheader("Seasonal Balances – FGE & EA")
+        source = st.radio("Source de données", ["FGE", "EA"], index=0, horizontal=True)
 
-        st.markdown("---")
+        if source == "FGE":
+            vlsfo_data, hsfo_data = load_fge_balances()
 
-        st.subheader("HSFO (FGE)")
-        hsfo_figs = plot_fge_balances(hsfo_data, "HSFO")
-        cols = st.columns(3); col_idx = 0
-        for i, (title, fig) in enumerate(hsfo_figs.items()):
-            with cols[col_idx]:
-                st.plotly_chart(fig, use_container_width=True, key=f"fge_hsfo_{i}")
-            col_idx = (col_idx + 1) % 3
+            st.subheader("VLSFO (FGE)")
+            vlsfo_figs = plot_fge_balances(vlsfo_data, "VLSFO")
+            cols = st.columns(3); col_idx = 0
+            for i, (title, fig) in enumerate(vlsfo_figs.items()):
+                with cols[col_idx]:
+                    st.plotly_chart(fig, use_container_width=True, key=f"fge_vlsfo_{i}")
+                col_idx = (col_idx + 1) % 3
 
-    else:
-        st.subheader("EA (Europe fuel oil – Fig.10)")
-        with st.expander("EA – PDF utilisé (debug)", expanded=False):
-            st.caption(f"Dossier EA_PDF_DIR: {EA_DIR}")
-            if platform.system() != "Windows" and (EA_DIR.startswith('\\') or EA_DIR.startswith('//')):
-                st.warning(
-                    "Chemin UNC détecté sur un runtime Linux : non accessible directement.\n"
-                    "➡️ Copie le PDF dans le repo 'EA balances' ou monte le partage réseau."
-                )
-            try:
-                pdf_path = pick_ea_pdf()
-                st.info(f"PDF choisi par le parseur : **{pdf_path.name}**")
-            except Exception as e:
-                st.warning(f"Impossible d’évaluer le PDF choisi : {e}")
+            st.markdown("---")
 
-        c1, c2, c3 = st.columns([1, 1, 3])
-        with c1:
-            metric = st.selectbox("Metric", ["Balance", "Demand", "Supply"], index=0)
-        with c2:
-            grade = st.radio("Grade", ["HSFO", "LSFO"], index=0, horizontal=True)
-        with c3:
-            if st.button("🔄 Reparser EA (clear cache)"):
-                get_ea_data_cached.clear()
+            st.subheader("HSFO (FGE)")
+            hsfo_figs = plot_fge_balances(hsfo_data, "HSFO")
+            cols = st.columns(3); col_idx = 0
+            for i, (title, fig) in enumerate(hsfo_figs.items()):
+                with cols[col_idx]:
+                    st.plotly_chart(fig, use_container_width=True, key=f"fge_hsfo_{i}")
+                col_idx = (col_idx + 1) % 3
+
+        else:
+            st.subheader("EA (Europe fuel oil – Fig.10)")
+            with st.expander("EA – PDF utilisé (debug)", expanded=False):
+                st.caption(f"Dossier EA_PDF_DIR: {EA_DIR}")
+                if platform.system() != "Windows" and (EA_DIR.startswith('\\') or EA_DIR.startswith('//')):
+                    st.warning(
+                        "Chemin UNC détecté sur un runtime Linux : non accessible directement.\n"
+                        "➡️ Copie le PDF dans le repo 'EA balances' ou monte le partage réseau."
+                    )
                 try:
-                    st.rerun()
-                except Exception:
-                    st.experimental_rerun()
+                    pdf_path = pick_ea_pdf()
+                    st.info(f"PDF choisi par le parseur : **{pdf_path.name}**")
+                except Exception as e:
+                    st.warning(f"Impossible d’évaluer le PDF choisi : {e}")
 
-        with st.spinner("Chargement EA…"):
-            try:
-                ea_data = get_ea_data_cached(PARSER_VERSION)
-            except FileNotFoundError as e:
-                st.error(f"EA_PDF_DIR: {EA_DIR}\n{e}")
-                st.stop()
-            except Exception as e:
-                st.exception(e)
-                st.stop()
+            c1, c2, c3 = st.columns([1, 1, 3])
+            with c1:
+                metric = st.selectbox("Metric", ["Balance", "Demand", "Supply"], index=0)
+            with c2:
+                grade = st.radio("Grade", ["HSFO", "LSFO"], index=0, horizontal=True)
+            with c3:
+                if st.button("🔄 Reparser EA (clear cache)"):
+                    get_ea_data_cached.clear()
+                    try:
+                        st.rerun()
+                    except Exception:
+                        st.experimental_rerun()
 
-        figs = plot_ea(ea_data, metric=metric, grade=grade)
-        cols = st.columns(3); col_idx = 0
-        for i, (title, fig) in enumerate(figs.items()):
-            with cols[col_idx]:
-                st.plotly_chart(fig, use_container_width=True,
-                                key=f"ea_{metric}_{grade}_{i}")
-            col_idx = (col_idx + 1) % 3
+            with st.spinner("Chargement EA…"):
+                try:
+                    ea_data = get_ea_data_cached(PARSER_VERSION)
+                except FileNotFoundError as e:
+                    st.error(f"EA_PDF_DIR: {EA_DIR}\n{e}")
+                    st.stop()
+                except Exception as e:
+                    st.exception(e)
+                    st.stop()
+
+            figs = plot_ea(ea_data, metric=metric, grade=grade)
+            cols = st.columns(3); col_idx = 0
+            for i, (title, fig) in enumerate(figs.items()):
+                with cols[col_idx]:
+                    st.plotly_chart(fig, use_container_width=True,
+                                    key=f"ea_{metric}_{grade}_{i}")
+                col_idx = (col_idx + 1) % 3
+
+    # -------------------- Litasco supply (NWE / MED ready) --------------------
+    with subtab_litasco:
+        # Cette fonction affiche toute l’UI (sélecteur NWE/MED, chemins, génération, email, CSV, etc.)
+        run_litasco_supply_tab()
+
 
 # === TAB 5: FORWARD CURVES ===
 with tab5:
