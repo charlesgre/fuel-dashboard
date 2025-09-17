@@ -160,34 +160,73 @@ def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
 
     fig = go.Figure()
 
+    # Bande min/max
     if band_years and band_min.notna().any() and band_max.notna().any():
-        fig.add_trace(go.Scatter(x=MONTH_TICKS, y=band_min.values,
-                                 mode="lines", line=dict(width=0),
-                                 showlegend=False, hoverinfo="skip"))
-        fig.add_trace(go.Scatter(x=MONTH_TICKS, y=band_max.values,
-                                 mode="lines", line=dict(width=0),
-                                 fill="tonexty", fillcolor="rgba(128,128,128,0.20)",
-                                 name=f"{BAND_START}–{BAND_END} range",
-                                 hoverinfo="skip"))
-
-    for y in sorted(years):
-        line = ym[y]
-        color = SPECIAL_COLORS.get(y, None)
         fig.add_trace(go.Scatter(
-            x=MONTH_TICKS, y=line.values, mode="lines+markers",
-            name=str(y), line=dict(width=2 if y in SPECIAL_COLORS else 1.3, color=color),
-            opacity=1.0 if y in SPECIAL_COLORS else 0.6
+            x=MONTH_TICKS, y=band_min.values, mode="lines",
+            line=dict(width=0), showlegend=False, hoverinfo="skip"
+        ))
+        fig.add_trace(go.Scatter(
+            x=MONTH_TICKS, y=band_max.values, mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor="rgba(128,128,128,0.20)",
+            name=f"{BAND_START}–{BAND_END} range", hoverinfo="skip"
         ))
 
+    # Courbes par année
+    for y in sorted(years):
+        line = ym[y]
+        fig.add_trace(go.Scatter(
+            x=MONTH_TICKS, y=line.values, mode="lines+markers",
+            name=str(y),
+            line=dict(width=2 if y in SPECIAL_COLORS else 1.3,
+                      color=SPECIAL_COLORS.get(y, None)),
+            opacity=1.0 if y in SPECIAL_COLORS else 0.65,
+            marker=dict(size=4)
+        ))
+
+    # Légende SOUS le graphe + marges adaptées
     fig.update_layout(
         title=title,
         xaxis=dict(tickmode="array", tickvals=MONTH_TICKS, ticktext=MONTH_LABELS),
         yaxis_title="kt",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
-        margin=dict(l=10, r=10, t=50, b=10),
+        legend=dict(
+            orientation="h",
+            yanchor="top", y=-0.22,   # sous la figure
+            xanchor="left", x=0.0,
+            font=dict(size=10)
+        ),
+        margin=dict(l=10, r=10, t=40, b=90),  # + de marge en bas pour la légende
         height=420
     )
     return fig
+
+def render_fig_grid(figs: list[go.Figure | None], max_cols: int = 3):
+    """Affiche les figures en 1..max_cols colonnes, centrées si < max_cols."""
+    valid = [f for f in figs if f is not None]
+    if not valid:
+        return
+    n = len(valid)
+
+    # 1 figure : centrée
+    if n == 1:
+        cols = st.columns([1, 2, 1])
+        with cols[1]:
+            st.plotly_chart(valid[0], use_container_width=True, config={"displayModeBar": False})
+        return
+
+    # 2 figures : 2 colonnes, sinon jusqu'à 3 colonnes
+    cols_count = 2 if n == 2 else min(max_cols, 3)
+    rows = (n + cols_count - 1) // cols_count
+    idx = 0
+    for _ in range(rows):
+        cols = st.columns(cols_count)
+        for c in range(cols_count):
+            if idx >= n:
+                break
+            with cols[c]:
+                st.plotly_chart(valid[idx], use_container_width=True, config={"displayModeBar": False})
+            idx += 1
+
 
 # ================== TAB ==================
 def run_litasco_supply_tab():
@@ -293,38 +332,34 @@ def run_litasco_supply_tab():
                 if key not in refinery_product:
                     continue
                 df_ref = refinery_product[key]
-                st.subheader(ref["Refinery"])
-                cols = st.columns(3); ci = 0
+                st.subheader(f"{ref['Refinery']}")
+                figs_ref = []
                 for product in df_ref.columns:
                     s = df_ref[product]
                     if s.isna().all() or (s == 0).all():
                         continue
-                    fig = seasonality_figure(s, f"{country} / {ref['Refinery']} / {product}")
-                    if fig:
-                        with cols[ci]: st.plotly_chart(fig, use_container_width=True)
-                        ci = (ci + 1) % 3
+                    figs_ref.append(seasonality_figure(s, f"{country} / {ref['Refinery']} / {product}"))
+                render_fig_grid(figs_ref, max_cols=3)
 
         st.subheader("Country totals")
-        cols = st.columns(3); ci = 0
+        figs_ctry = []
         for product, s in country_product[country].items():
             if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0):
                 continue
-            fig = seasonality_figure(s, f"{country} / {product}")
-            if fig:
-                with cols[ci]: st.plotly_chart(fig, use_container_width=True)
-                ci = (ci + 1) % 3
+            figs_ctry.append(seasonality_figure(s, f"{country} / {product}"))
+        render_fig_grid(figs_ctry, max_cols=3)
+
 
         st.markdown("---")
 
-    st.header(f"{region} — Totaux régionaux")
-    cols = st.columns(3); ci = 0
-    for product, s in sorted(totals_product.items(), key=lambda kv: kv[0].lower()):
-        if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0):
-            continue
-        fig = seasonality_figure(s, f"{region} Total / {product}")
-        if fig:
-            with cols[ci]: st.plotly_chart(fig, use_container_width=True)
-            ci = (ci + 1) % 3
+        st.header(f"{region} — Totaux régionaux")
+        figs_reg = []
+        for product, s in sorted(totals_product.items(), key=lambda kv: kv[0].lower()):
+            if s is None or s.isna().all() or (np.nan_to_num(s.values).sum() == 0.0):
+                continue
+            figs_reg.append(seasonality_figure(s, f"{region} Total / {product}"))
+        render_fig_grid(figs_reg, max_cols=3)
+
 
     # 5) Résumé
     today = datetime.now().strftime("%Y-%m-%d")
