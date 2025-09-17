@@ -6,9 +6,15 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
+from pathlib import Path
 
 # --------- Dossier par défaut pour les fichiers Runs (UNC) ---------
 DEFAULT_LITASCO_RUNS_DIR = r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\Litasco balances\Litasco supply"
+
+# Fallback local (comme "Bunker diff/…") pour les environnements non-Windows
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_LITASCO_DIR = REPO_ROOT / "Litasco balances" / "Litasco supply"
+LOCAL_LITASCO_DIR.mkdir(parents=True, exist_ok=True)  # ok si déjà présent
 
 # ========== PARAMETRISATION REGION ==========
 # Dictionnaires par région. NWE est rempli; MED est un placeholder prêt à être complété.
@@ -70,22 +76,44 @@ MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov
 
 # ================== IO HELPERS ==================
 def pick_runs_path(explicit_path: str, runs_dir: str, pattern: str) -> str:
-    """Retourne le fichier explicite si fourni, sinon le plus récent du dossier/pattern."""
-    if explicit_path and os.path.exists(explicit_path):
+    """
+    1) Si explicit_path pointe vers un fichier existant -> return.
+    2) Sinon, on tente le dossier UNC (Windows uniquement).
+    3) Sinon, on tente le dossier local du repo: 'Litasco balances/Litasco supply'.
+    Retourne le fichier le plus récent qui matche pattern.
+    """
+    # 1) Chemin explicite
+    if explicit_path and os.path.isfile(explicit_path):
         return explicit_path
 
-    # Sécuriser le chemin UNC → utiliser des / (glob est capricieux avec \)
-    runs_dir_fixed = runs_dir.replace("\\", "/")
-    search_pattern = os.path.join(runs_dir_fixed, pattern)
+    candidates = []
 
-    files = glob.glob(search_pattern)
-    if not files:
+    # 2) Dossier UNC (seulement si Windows)
+    if platform.system() == "Windows":
+        unc_dir = runs_dir.replace("\\", "/")
+        candidates.append(os.path.join(unc_dir, pattern))
+
+    # 3) Fallback local relatif au repo
+    local_dir = str(LOCAL_LITASCO_DIR).replace("\\", "/")
+    candidates.append(os.path.join(local_dir, pattern))
+
+    # Recherche
+    matched = []
+    for pat in candidates:
+        matched.extend(glob.glob(pat))
+
+    if not matched:
         raise FileNotFoundError(
-            f"Aucun fichier 'Runs' trouvé dans {runs_dir} avec le pattern {pattern}.\n"
-            f"(Cherché: {search_pattern})"
+            "Aucun fichier 'Runs' trouvé.\n"
+            f"- Cherché UNC: {runs_dir}\\{pattern}\n"
+            f"- Cherché local: {LOCAL_LITASCO_DIR}\\{pattern}\n"
+            "➡️ Dépose le fichier via l'uploader ci-dessous OU copie-le dans "
+            "'Litasco balances/Litasco supply' au sein du repo."
         )
-    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return files[0]
+
+    matched.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return matched[0]
+
 
 def load_runs(runs_path: str, sheet_name: str) -> pd.DataFrame:
     df = pd.read_excel(runs_path, sheet_name=sheet_name)
@@ -183,19 +211,32 @@ def run_litasco_supply_tab():
         # bouton pour re-générer
         pass
 
-    # Chemins d'entrée (pas d'email ni d'export images)
+    # Chemins d'entrée (style "Bunker diff/…")
     runs_file_explicit = st.text_input(
-        "Fichier Runs (facultatif, sinon on prend le plus récent)",
-        value=""  # vide => on cherche dans le dossier
+        "Fichier Runs (chemin complet facultatif)",
+        value=""  # vide => on cherche auto
     )
     runs_dir = st.text_input(
-        "Dossier des Runs (on prend le plus récent)",
+        "Dossier des Runs (UNC Windows)",
         value=DEFAULT_LITASCO_RUNS_DIR
     )
     runs_pattern = st.text_input(
         "Pattern de fichier",
         value="Europe Runs Recap*.xlsx"
     )
+
+    st.caption(f"Fallback local (repo): {LOCAL_LITASCO_DIR}")
+
+    # Uploader (si tu ne peux pas accéder au UNC)
+    uploaded = st.file_uploader("…ou dépose un fichier .xlsx ici", type=["xlsx"])
+    if uploaded is not None:
+        # On sauvegarde dans le dossier local du repo et on l'utilisera comme 'explicit_path'
+        save_path = LOCAL_LITASCO_DIR / uploaded.name
+        with open(save_path, "wb") as f:
+            f.write(uploaded.getbuffer())
+        runs_file_explicit = str(save_path)
+        st.success(f"Fichier uploadé: {save_path.name}")
+
 
     # Alerte UNC si non-Windows
     if platform.system() != "Windows" and (runs_dir.startswith("\\") or runs_dir.startswith("//")):
