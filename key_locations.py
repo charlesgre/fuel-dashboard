@@ -52,7 +52,7 @@ QUERY_BY_LOCATION = {
 # === Pays par défaut (à ajuster si besoin) ===
 DEFAULT_COUNTRIES = {
     # on garde la Russie comme avant
-    "Global Russian exports": ["India", "China", "Egypt", "Saudi Arabia", "Malaysia", "Singapore", "Not Known"],
+    "Global Russian exports": ["India", "China", "Egypt", "Saudi Arabia", "Malaysia", "Singapore", "Turkey", "Not Known"],
 
     # 🔹 Iran — on cible exactement cette liste (l’ordre est respecté)
     "Iranian exports": [
@@ -159,7 +159,7 @@ def compute_monthly(root: ET.Element, countries: list, since=datetime(2024,1,1))
     else:
         selected_sum = pd.Series(0, index=df.index, dtype=float)
 
-    df["Other/Unknown"] = (df["Total_all"] - selected_sum).clip(lower=0)
+    df["Other"] = (df["Total_all"] - selected_sum).clip(lower=0)
     return df
 
 
@@ -272,8 +272,8 @@ def fig_monthly_matplotlib(df: pd.DataFrame, countries: list, title: str):
 
     plot_cols, labels, missing = _resolve_in_df(df.columns, countries)
     # ajoute le bucket Other/Unknown en dernier
-    cols_for_stack = plot_cols + (["Other/Unknown"] if "Other/Unknown" in df.columns else [])
-    labels_for_stack = labels + (["Other/Unknown"] if "Other/Unknown" in df.columns else [])
+    cols_for_stack = plot_cols + (["Other"] if "Other" in df.columns else [])
+    labels_for_stack = labels + (["Other"] if "Other" in df.columns else [])
 
     if not cols_for_stack:
         ax.text(0.5, 0.5, "No data for selected countries", ha="center", va="center")
@@ -314,8 +314,8 @@ def fig_monthly_plotly(df: pd.DataFrame, countries: list, title: str) -> go.Figu
         return fig
 
     plot_cols, labels, _ = _resolve_in_df(df.columns, countries)
-    cols_for_stack = plot_cols + (["Other/Unknown"] if "Other/Unknown" in df.columns else [])
-    labels_for_stack = labels + (["Other/Unknown"] if "Other/Unknown" in df.columns else [])
+    cols_for_stack = plot_cols + (["Other"] if "Other" in df.columns else [])
+    labels_for_stack = labels + (["Other"] if "Other" in df.columns else [])
 
     if not cols_for_stack:
         fig.add_annotation(text="No data for selected countries",
