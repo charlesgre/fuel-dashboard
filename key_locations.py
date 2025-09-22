@@ -10,12 +10,21 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from collections import defaultdict
+import unicodedata
 
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
 import plotly.graph_objects as go  # NEW
+
+
+def _canon(s: str) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.casefold().strip()
 
 def _get_secret(name: str) -> str | None:
     """Try Streamlit secrets first, then environment variables."""
@@ -80,16 +89,24 @@ COUNTRY_ALIASES = {
 
 def _resolve_in_df(df_cols, requested):
     """Retourne (colonnes_existantes, labels_pour_legende, manquants)."""
-    cols = set(df_cols)
+    canon_to_real = {_canon(c): c for c in df_cols}
     plot_cols, labels, missing = [], [], []
     for r in requested:
-        col = r if r in cols else COUNTRY_ALIASES.get(r)
-        if col in cols:
-            plot_cols.append(col)
-            labels.append(r)  # on garde le libellé demandé dans la légende
+        # on essaie le libellé demandé et son alias éventuel
+        candidates = [r, COUNTRY_ALIASES.get(r, r)]
+        match = None
+        for cand in candidates:
+            real = canon_to_real.get(_canon(cand))
+            if real:
+                match = real
+                break
+        if match:
+            plot_cols.append(match)  # vrai nom de colonne (API)
+            labels.append(r)         # mais on affiche le label demandé
         else:
             missing.append(r)
     return plot_cols, labels, missing
+
 
 
 
@@ -122,11 +139,13 @@ def compute_monthly(root: ET.Element, countries: list, since=datetime(2024,1,1))
     monthly_sel = defaultdict(lambda: defaultdict(float))
     monthly_total = defaultdict(float)
 
-    def normalize_country(c: str) -> str:
-        return COUNTRY_ALIASES.get(c, c)
-
-    # on normalise la liste demandée vers les libellés API
-    wanted_api_names = [normalize_country(c) for c in countries]
+    # mappe un nom API vers le label utilisateur (tolérant)
+    def label_for(api_country: str) -> str | None:
+        c_api = _canon(api_country)
+        for r in countries:
+            if c_api == _canon(r) or c_api == _canon(COUNTRY_ALIASES.get(r, r)):
+                return r
+        return None
 
     for m in root.findall(".//movement"):
         try:
@@ -138,8 +157,10 @@ def compute_monthly(root: ET.Element, countries: list, since=datetime(2024,1,1))
             key = date.strftime("%Y-%m")
 
             monthly_total[key] += tonnes
-            if api_country in wanted_api_names:
-                monthly_sel[key][api_country] += tonnes
+            rlabel = label_for(api_country)
+            if rlabel is not None:
+                # on agrège sous le label utilisateur -> colonnes stables = pays sélectionnés
+                monthly_sel[key][rlabel] += tonnes
         except Exception:
             continue
 
@@ -148,19 +169,15 @@ def compute_monthly(root: ET.Element, countries: list, since=datetime(2024,1,1))
 
     df = df_sel.reindex(sorted(set(df_sel.index).union(s_total.index))).fillna(0)
     df["Total_all"] = s_total.reindex(df.index).fillna(0)
-
     df["3M Avg"] = df["Total_all"].rolling(3).mean()
     df["12M Avg"] = df["Total_all"].rolling(12).mean()
 
-    # somme des pays sélectionnés : on ne garde que les colonnes réellement présentes
-    sel_cols_present = [c for c in wanted_api_names if c in df.columns]
-    if sel_cols_present:
-        selected_sum = df[sel_cols_present].sum(axis=1)
-    else:
-        selected_sum = pd.Series(0, index=df.index, dtype=float)
-
+    # somme des pays sélectionnés (les colonnes sont déjà les labels utilisateur)
+    sel_cols_present = [c for c in countries if c in df.columns]
+    selected_sum = df[sel_cols_present].sum(axis=1) if sel_cols_present else pd.Series(0, index=df.index, dtype=float)
     df["Other"] = (df["Total_all"] - selected_sum).clip(lower=0)
     return df
+
 
 
 def compute_discharge_table(root: ET.Element, target_year: int, target_month: int):
