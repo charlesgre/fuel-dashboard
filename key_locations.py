@@ -26,6 +26,22 @@ def _canon(s: str) -> str:
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.casefold().strip()
 
+CANON_PREFERRED = {
+    _canon("Turkey"):  "Turkey",
+    _canon("Turkiye"): "Turkey",
+    _canon("Türkiye"): "Turkey",
+    # (au besoin, d’autres équivalences)
+}
+
+def harmonize_country_cols(df: pd.DataFrame) -> pd.DataFrame:
+    ren = {}
+    for col in df.columns:
+        c = _canon(col)
+        pref = CANON_PREFERRED.get(c)
+        if pref and col != pref:
+            ren[col] = pref
+    return df.rename(columns=ren)
+
 def _get_secret(name: str) -> str | None:
     """Try Streamlit secrets first, then environment variables."""
     try:
@@ -455,9 +471,11 @@ def render_key_locations_export():
 
         # Calculs
         df_month = compute_monthly(root, countries)
+        df_month = harmonize_country_cols(df_month)  # <-- AJOUT
+
         df_dis = compute_discharge_table(root, target_year, target_month)
         df_yoy = compute_yoy(root, countries, target_year, target_month)
-        yoy_text = yoy_narrative(df_yoy, target_year, target_month)
+        yoy_text = yoy_narrative(df_yoy, target_year, target_month)  # <-- FIX
 
     # === Affichage ===
     st.subheader("Monthly exports")
