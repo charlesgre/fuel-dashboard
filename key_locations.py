@@ -86,8 +86,8 @@ QUERY_BY_LOCATION = {
 DEFAULT_COUNTRIES = {
     "Global Russian exports": [
         "India", "China", "Egypt", "Saudi Arabia",
-        "Malaysia", "Singapore", "United Arab Emirates",  # <-- AJOUTÉ ICI
-        "Turkey", "Not Known"
+        "Malaysia", "Singapore", "United Arab Emirates",
+        "Turkey", "Greece", "Not Known"   # <-- Greece ajouté
     ],
 
     # 🔹 Iran — on cible exactement cette liste (l’ordre est respecté)
@@ -166,7 +166,6 @@ def compute_monthly(root: ET.Element, countries: list, since=datetime(2024,1,1))
     monthly_sel = defaultdict(lambda: defaultdict(float))
     monthly_total = defaultdict(float)
 
-    # mappe un nom API vers le label utilisateur (tolérant)
     def label_for(api_country: str) -> str | None:
         c_api = _canon(api_country)
         for r in countries:
@@ -186,7 +185,6 @@ def compute_monthly(root: ET.Element, countries: list, since=datetime(2024,1,1))
             monthly_total[key] += tonnes
             rlabel = label_for(api_country)
             if rlabel is not None:
-                # on agrège sous le label utilisateur -> colonnes stables = pays sélectionnés
                 monthly_sel[key][rlabel] += tonnes
         except Exception:
             continue
@@ -199,12 +197,8 @@ def compute_monthly(root: ET.Element, countries: list, since=datetime(2024,1,1))
     df["3M Avg"] = df["Total_all"].rolling(3).mean()
     df["12M Avg"] = df["Total_all"].rolling(12).mean()
 
-    # somme des pays sélectionnés (les colonnes sont déjà les labels utilisateur)
-    sel_cols_present = [c for c in countries if c in df.columns]
-    selected_sum = df[sel_cols_present].sum(axis=1) if sel_cols_present else pd.Series(0, index=df.index, dtype=float)
-    df["Other"] = (df["Total_all"] - selected_sum).clip(lower=0)
+    # plus de colonne "Other"
     return df
-
 
 
 def compute_discharge_table(root: ET.Element, target_year: int, target_month: int):
@@ -307,43 +301,25 @@ def style_yoy_table(df: pd.DataFrame):
     return styler.applymap(colorize, subset=["YoY Change (%)"])
 
 def fig_monthly_matplotlib(df: pd.DataFrame, countries: list, title: str):
-    """
-    Trace un histogramme empilé des exports mensuels.
-    - Les barres empilées utilisent les labels 'countries' (résolus via _resolve_in_df).
-    - Le bucket 'Other' est ajouté à la fin s'il est présent.
-    - Les couleurs proviennent d'abord de COLOR_MAP, sinon de TAB10.
-    """
     fig = plt.figure(figsize=(12, 6))
     ax = plt.gca()
 
-    # Cas sans données
     if df.empty:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
         return fig
 
-    # Résoudre les colonnes présentes + labels affichés
     plot_cols, labels, _ = _resolve_in_df(df.columns, countries)
-
-    # Ajouter 'Other' en dernier s'il existe
-    if "Other" in df.columns:
-        plot_cols = plot_cols + ["Other"]
-        labels    = labels + ["Other"]
 
     if not plot_cols:
         ax.text(0.5, 0.5, "No data for selected countries", ha="center", va="center", transform=ax.transAxes)
         return fig
 
-    # DataFrame prêt pour le plot : colonnes = ordre d’empilement ; renommées = labels affichés
     df_plot = df[plot_cols].copy()
     df_plot.columns = labels
 
-    # Palette: privilégie COLOR_MAP (ex. "Other", "Not Known") sinon cycle TAB10
     colors = [COLOR_MAP.get(lbl, TAB10[i % len(TAB10)]) for i, lbl in enumerate(labels)]
-
-    # Barres empilées
     df_plot.plot(kind="bar", stacked=True, ax=ax, color=colors)
 
-    # Courbes (moyennes / total tous pays)
     if "3M Avg" in df.columns:
         ax.plot(df.index, df["3M Avg"], linestyle="--", label="3-Month Trend")
     if "12M Avg" in df.columns:
@@ -351,7 +327,6 @@ def fig_monthly_matplotlib(df: pd.DataFrame, countries: list, title: str):
     if "Total_all" in df.columns:
         ax.plot(df.index, df["Total_all"], linewidth=2, label="Total loads")
 
-    # Finition
     ax.set_title(title)
     ax.set_ylabel("Kilotonnes (kt)")
     ax.set_xlabel("Month")
@@ -372,26 +347,22 @@ def fig_monthly_plotly(df: pd.DataFrame, countries: list, title: str) -> go.Figu
         return fig
 
     plot_cols, labels, _ = _resolve_in_df(df.columns, countries)
-    cols_for_stack = plot_cols + (["Other"] if "Other" in df.columns else [])
-    labels_for_stack = labels + (["Other"] if "Other" in df.columns else [])
-
-    if not cols_for_stack:
+    if not plot_cols:
         fig.add_annotation(text="No data for selected countries",
                            showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
         return fig
 
     x = df.index.astype(str)
 
-    for i, col in enumerate(cols_for_stack):
-        lbl = labels_for_stack[i]
+    for i, col in enumerate(plot_cols):
+        lbl = labels[i]
         fig.add_trace(go.Bar(
             x=x, y=df[col],
             name=lbl,
-            marker_color=TAB10[i % len(TAB10)],
+            marker_color=COLOR_MAP.get(lbl, TAB10[i % len(TAB10)]),
             hovertemplate=f"<b>{lbl}</b><br>%{{x}}<br>%{{y:.1f}} kt<extra></extra>",
         ))
 
-    # courbes: moyennes mobiles + total mensuel (tous pays)
     if "3M Avg" in df.columns:
         fig.add_trace(go.Scatter(x=x, y=df["3M Avg"], name="3-Month Trend",
                                  mode="lines", line=dict(dash="dash")))
