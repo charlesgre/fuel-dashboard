@@ -54,6 +54,14 @@ def _get_secret(name: str) -> str | None:
 TAB10 = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
          '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
+# mêmes couleurs pour les “unknown”
+COLOR_MAP = {
+    "Other": "#7f7f7f",
+    "Not Known": "#7f7f7f",
+    "Unknown": "#7f7f7f",        # au cas où
+    "Unknown Asia": "#7f7f7f",    # utile pour l’onglet Iran
+}
+
 # --- (Optionnel) charger un .env ---
 try:
     from dotenv import load_dotenv
@@ -76,8 +84,11 @@ QUERY_BY_LOCATION = {
 
 # === Pays par défaut (à ajuster si besoin) ===
 DEFAULT_COUNTRIES = {
-    # on garde la Russie comme avant
-    "Global Russian exports": ["India", "China", "Egypt", "Saudi Arabia", "Malaysia", "Singapore", "Turkey", "Not Known"],
+    "Global Russian exports": [
+        "India", "China", "Egypt", "Saudi Arabia",
+        "Malaysia", "Singapore", "United Arab Emirates",  # <-- AJOUTÉ ICI
+        "Turkey", "Not Known"
+    ],
 
     # 🔹 Iran — on cible exactement cette liste (l’ordre est respecté)
     "Iranian exports": [
@@ -296,46 +307,60 @@ def style_yoy_table(df: pd.DataFrame):
     return styler.applymap(colorize, subset=["YoY Change (%)"])
 
 def fig_monthly_matplotlib(df: pd.DataFrame, countries: list, title: str):
+    """
+    Trace un histogramme empilé des exports mensuels.
+    - Les barres empilées utilisent les labels 'countries' (résolus via _resolve_in_df).
+    - Le bucket 'Other' est ajouté à la fin s'il est présent.
+    - Les couleurs proviennent d'abord de COLOR_MAP, sinon de TAB10.
+    """
     fig = plt.figure(figsize=(12, 6))
     ax = plt.gca()
 
+    # Cas sans données
     if df.empty:
-        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
         return fig
 
-    plot_cols, labels, missing = _resolve_in_df(df.columns, countries)
-    # ajoute le bucket Other/Unknown en dernier
-    cols_for_stack = plot_cols + (["Other"] if "Other" in df.columns else [])
-    labels_for_stack = labels + (["Other"] if "Other" in df.columns else [])
+    # Résoudre les colonnes présentes + labels affichés
+    plot_cols, labels, _ = _resolve_in_df(df.columns, countries)
 
-    if not cols_for_stack:
-        ax.text(0.5, 0.5, "No data for selected countries", ha="center", va="center")
+    # Ajouter 'Other' en dernier s'il existe
+    if "Other" in df.columns:
+        plot_cols = plot_cols + ["Other"]
+        labels    = labels + ["Other"]
+
+    if not plot_cols:
+        ax.text(0.5, 0.5, "No data for selected countries", ha="center", va="center", transform=ax.transAxes)
         return fig
 
-    df_plot = df[cols_for_stack].copy()
-    df_plot.columns = labels_for_stack
+    # DataFrame prêt pour le plot : colonnes = ordre d’empilement ; renommées = labels affichés
+    df_plot = df[plot_cols].copy()
+    df_plot.columns = labels
 
-    colors = [TAB10[i % len(TAB10)] for i in range(len(labels_for_stack))]
+    # Palette: privilégie COLOR_MAP (ex. "Other", "Not Known") sinon cycle TAB10
+    colors = [COLOR_MAP.get(lbl, TAB10[i % len(TAB10)]) for i, lbl in enumerate(labels)]
+
+    # Barres empilées
     df_plot.plot(kind="bar", stacked=True, ax=ax, color=colors)
 
-    # courbes sur le VRAI total tous pays
+    # Courbes (moyennes / total tous pays)
     if "3M Avg" in df.columns:
-        ax.plot(df["3M Avg"], linestyle="--", label="3-Month Trend")
+        ax.plot(df.index, df["3M Avg"], linestyle="--", label="3-Month Trend")
     if "12M Avg" in df.columns:
-        ax.plot(df["12M Avg"], label="12-Month Avg")
-
-    # (optionnel) trace aussi la courbe du total mensuel
+        ax.plot(df.index, df["12M Avg"], label="12-Month Avg")
     if "Total_all" in df.columns:
-        ax.plot(df["Total_all"], linewidth=2, label="Total loads")
+        ax.plot(df.index, df["Total_all"], linewidth=2, label="Total loads")
 
+    # Finition
     ax.set_title(title)
     ax.set_ylabel("Kilotonnes (kt)")
     ax.set_xlabel("Month")
-    plt.xticks(rotation=45, ha="right")
     ax.grid(True, axis="y")
+    plt.xticks(rotation=45, ha="right")
     ax.legend()
     plt.tight_layout()
     return fig
+
 
 
 
