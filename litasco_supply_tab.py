@@ -86,36 +86,59 @@ def _list_matches(dir_path: Path, patterns: list[str]) -> list[Path]:
 def pick_latest_runs_path(runs_dir: str) -> str:
     """
     Choisit automatiquement le dernier Excel :
-      1) dans runs_dir (UNC),
-      2) sinon dans LOCAL_LITASCO_DIR (copie locale).
-    Try patterns: 'Europe Runs Recap*.xlsx' puis '*.xlsx'.
+      - Sur Windows: cherche dans runs_dir (UNC) + LOCAL_LITASCO_DIR
+      - Sur non-Windows: ignore le UNC et cherche seulement dans LOCAL_LITASCO_DIR
+    Motifs testés: 'Europe Runs Recap*.xlsx' puis '*.xlsx'
     Tri: date dans le nom > date de modification.
     """
     patterns = ["Europe Runs Recap*.xlsx", "*.xlsx"]
-
     candidates: list[Path] = []
-    # 1) UNC (si fourni)
-    if runs_dir:
-        dir_unc = Path(runs_dir)
-        candidates += _list_matches(dir_unc, patterns)
+    searched_dirs: list[Path] = []
 
-    # 2) Fallback local du repo
-    candidates += _list_matches(LOCAL_LITASCO_DIR, patterns)
+    # 1) UNC seulement si Windows
+    if runs_dir and platform.system() == "Windows":
+        dir_unc = Path(runs_dir)
+        searched_dirs.append(dir_unc)
+        try:
+            candidates += _list_matches(dir_unc, patterns)
+        except Exception:
+            # ne bloque pas si le partage est inaccessible
+            pass
+
+    # 2) Fallback local du repo (toujours)
+    searched_dirs.append(LOCAL_LITASCO_DIR)
+    try:
+        candidates += _list_matches(LOCAL_LITASCO_DIR, patterns)
+    except Exception:
+        pass
 
     if not candidates:
-        raise FileNotFoundError(
-            f"Aucun fichier Excel trouvé dans:\n"
-            f"- {runs_dir}\n- {LOCAL_LITASCO_DIR}\n"
-            f"(patterns testés: {', '.join(patterns)})"
+        searched = "\n".join(f"- {p}" for p in searched_dirs)
+        hint = (
+            "Aucun Excel visible par le runtime.\n"
+            f"Dossiers cherchés:\n{searched}\n"
+            "→ Si tu es sur un runtime non-Windows (Docker/serveur), place l'Excel dans le dossier local du repo ci-dessus "
+            "ou monte le partage UNC."
         )
+        raise FileNotFoundError(hint)
 
     # Trier par date dans le nom (si dispo), sinon mtime
     scored = []
-    for p in candidates:
-        d = _parse_date_from_name(p)
-        scored.append((p, d if d is not None else datetime.fromtimestamp(p.stat().st_mtime)))
+    for p in set(candidates):
+        try:
+            d = _parse_date_from_name(p)
+            if d is None:
+                d = datetime.fromtimestamp(p.stat().st_mtime)
+            scored.append((p, d))
+        except Exception:
+            continue
+
+    if not scored:
+        raise FileNotFoundError("Fichiers trouvés mais illisibles/indisponibles.")
+
     scored.sort(key=lambda x: x[1], reverse=True)
     return str(scored[0][0])
+
 
 def load_runs(runs_path: str, sheet_name: str) -> pd.DataFrame:
     df = pd.read_excel(runs_path, sheet_name=sheet_name)
