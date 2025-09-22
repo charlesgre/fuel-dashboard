@@ -386,6 +386,7 @@ def fig_monthly_plotly(df: pd.DataFrame, countries: list, title: str) -> go.Figu
 
 
 
+
 def df_to_png_table(df: pd.DataFrame, title: str = None, scale=(1.2,1.4)):
     fig, ax = plt.subplots(figsize=(10, 0.6 + max(len(df),1)*0.35))
     ax.axis("off")
