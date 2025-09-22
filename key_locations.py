@@ -74,7 +74,7 @@ COUNTRY_ALIASES = {
     "USA": "United States",
     "UAE": "United Arab Emirates",
     "UK": "United Kingdom",
-    "Turkey": "Türkiye",
+    "Turkey": "Turkiye",
     "Not Known": "Not known",   # <--- important
 }
 
