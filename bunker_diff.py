@@ -67,7 +67,7 @@ def plot_bunker_price_diffs(excel_path: str = None):
         ("MFRDD00", "PUMFD00"), ("MFSPE00", "AMFSA00"), ("MFZHN00", "AMFSA00"),
         ("PUAER00", "AAPJW00"), ("PUAFA00", "PUABC00"), ("PUAFI00", "PUAFZ00"),
         ("PUAXP00", "AAIDC00"), ("PUBAD00", "PUAFZ00"),
-        ("PPXDK00", "AAIDC00"), ("AMFSA00", "MFFJD00"),
+        ("PPXDK00", "AAIDC00"), ("MFFJD00", "AMFSA00"),
     ]
 
     required_symbols = {s for a, b in quote_pairs for s in (a, b)}
