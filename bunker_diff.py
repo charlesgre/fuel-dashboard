@@ -17,9 +17,8 @@ def plot_bunker_price_diffs():
         ("BFDZA00", "AAPJW00"), ("MFAGD00", "PUMFD00"), ("MFLOM00", "PUMFD00"),
         ("MFRDD00", "PUMFD00"), ("MFSPE00", "AMFSA00"), ("MFZHN00", "AMFSA00"),
         ("PUAER00", "AAPJW00"), ("PUAFA00", "PUABC00"), ("PUAFI00", "PUAFZ00"),
-        ("PUAXP00", "AAIDC00"), ("PUBAD00", "PUAFZ00")
+        ("PUAXP00", "AAIDC00"), ("PUBAD00", "PUAFZ00"), ("PPXDK00", "AAIDC00" ), ("AMFSA00","MFFJD00")
     ]
-    
     required_symbols = set(s for pair in quote_pairs for s in pair)
     df_filtered = df[df['SYMBOL'].isin(required_symbols)]
     pivot = df_filtered.pivot(index='DATE', columns='SYMBOL', values='VALUE')
