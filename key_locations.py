@@ -48,13 +48,23 @@ def harmonize_country_cols(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _get_secret(name: str) -> str | None:
-    """Essaye d’abord st.secrets, puis les variables d’environnement."""
+    """Try st.secrets, then environment, then code fallback."""
     try:
         v = st.secrets.get(name)
     except Exception:
         v = None
-    return v or os.getenv(name)
+    return v or os.getenv(name) or PL_FALLBACK.get(name)
 
+
+PL_FALLBACK = {
+    "PL_USERNAME": "cgregoire_http_ARo30SE9a8nb",
+    "PL_PASSWORD": "X6JE22K23hIUZIaJ26IFO2senVxF41xP",
+    "PL_API_KEY":  "uiqt3492x3k80mq6fu1197qm",
+    "PL_API_HASH": "1EnaDpxpWnzaSpWK7BZyrsV919UmrTb1kouzooeG3rhabeDHPMteQV3jsaIQh6v3",
+}
+
+for k, v in PL_FALLBACK.items():
+    os.environ.setdefault(k, v)
 
 # Palette tab10 (bleu, orange, vert, rouge, …)
 TAB10 = [
