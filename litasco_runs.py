@@ -13,18 +13,22 @@ import streamlit as st
 # =========================
 # Réglages / chemins
 # =========================
-# 1) Dossier réseau (UNC)
 RUNS_DIR = r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\Litasco balances\Litasco supply"
-
-# 2) Dossier local du repo (fallback si l'UNC n'est pas monté)
 REPO_RUNS_DIR = Path(__file__).resolve().parent / "Litasco balances" / "Litasco supply"
-
-# 3) Fichier joint local (dernier recours)
 FALLBACK_FILE = Path("/mnt/data/Europe Runs Recap 09.16.2025.xlsx")
-
-# Motif des fichiers (accepte .xlsx / .xls)
 FILENAME_PREFIX = "Europe Runs Recap"
 FILENAME_GLOB = f"{FILENAME_PREFIX} *.xls*"
+
+# années à afficher
+YEAR_MIN, YEAR_MAX = 2020, 2026
+HIGHLIGHT_COLORS = {
+    2024: "#2ca02c",  # vert
+    2025: "#000000",  # noir
+    2026: "#d62728",  # rouge
+}
+MUTED_PALETTE = [
+    "#9ecae1", "#c7e9c0", "#fdd0a2", "#bcbddc", "#fdae6b", "#bdbdbd", "#c7c7c7"
+]  # tons doux
 
 
 # =========================
@@ -37,11 +41,8 @@ def _is_windows() -> bool:
 def _latest_in(folder: Path) -> Path | None:
     try:
         if folder.exists():
-            files = sorted(
-                folder.glob(FILENAME_GLOB),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
+            files = sorted(folder.glob(FILENAME_GLOB),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
             if files:
                 return files[0]
     except Exception:
@@ -50,23 +51,15 @@ def _latest_in(folder: Path) -> Path | None:
 
 
 def pick_latest_runs_file() -> Path:
-    """
-    Ordre de recherche :
-      1) UNC (RUNS_DIR)
-      2) Dossier local du repo (REPO_RUNS_DIR)
-      3) Fichier joint (FALLBACK_FILE)
-    """
+    """Ordre de recherche: UNC -> repo local -> fallback /mnt/data"""
     p = _latest_in(Path(RUNS_DIR))
     if p:
         return p
-
     p = _latest_in(REPO_RUNS_DIR)
     if p:
         return p
-
     if FALLBACK_FILE.exists():
         return FALLBACK_FILE
-
     raise FileNotFoundError(
         f"Aucun fichier {FILENAME_GLOB} trouvé dans:\n"
         f"- UNC: {RUNS_DIR}\n- Repo: {REPO_RUNS_DIR}\n"
@@ -79,38 +72,19 @@ def pick_latest_runs_file() -> Path:
 # =========================
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_runs_workbook(xlsx_path: Path) -> Dict[str, pd.DataFrame]:
-    """
-    Lit le classeur et renvoie {sheet_name: DataFrame}, après nettoyage (lignes/colonnes vides).
-    Supporte .xlsx (openpyxl) et .xls (xlrd pour .xls uniquement).
-    """
+    """Lit le classeur et renvoie {sheet_name: DataFrame}."""
     suffix = xlsx_path.suffix.lower()
-    engine = None
-    if suffix == ".xlsx":
-        engine = "openpyxl"
-    elif suffix == ".xls":
-        engine = "xlrd"  # nécessite xlrd compatible .xls
-
+    engine = "openpyxl" if suffix == ".xlsx" else ("xlrd" if suffix == ".xls" else None)
     try:
         wb = pd.read_excel(xlsx_path, sheet_name=None, engine=engine)
     except Exception as e:
         if suffix == ".xls":
-            raise RuntimeError(
-                "Lecture .xls impossible. Installe 'xlrd' compatible .xls ou convertis en .xlsx."
-            ) from e
+            raise RuntimeError("Lecture .xls impossible (installe xlrd compatible .xls ou convertis en .xlsx).") from e
         raise
-
-    cleaned: Dict[str, pd.DataFrame] = {}
-    for sh, df in wb.items():
-        cleaned[sh] = df.dropna(axis=0, how="all").dropna(axis=1, how="all")
-    return cleaned
+    return {sh: df.dropna(axis=0, how="all").dropna(axis=1, how="all") for sh, df in wb.items()}
 
 
 def _pick_region_sheet(wb: Dict[str, pd.DataFrame], region: str) -> Tuple[str, pd.DataFrame]:
-    """
-    region ∈ {'NWE','MED'}.
-    Si des feuilles 'NWE' / 'MED' existent -> on les prend.
-    Sinon: 1ère feuille = NWE, 2ème = MED.
-    """
     keys = list(wb.keys())
     if not keys:
         raise ValueError("Classeur vide : aucune feuille détectée.")
@@ -123,21 +97,13 @@ def _pick_region_sheet(wb: Dict[str, pd.DataFrame], region: str) -> Tuple[str, p
 
 
 def tidy_runs_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Entrée wide:
-      - 1ère colonne = dates -> 'Date'
-      - colonnes suivantes = pays
-    Sortie long:
-      [Date, Year, Month, MonthLabel, Country, Value]
-    """
+    """Wide -> long avec colonnes dérivées (Year/Month/MonthLabel)."""
     if df.empty:
         return pd.DataFrame(columns=["Date", "Year", "Month", "MonthLabel", "Country", "Value"])
 
     df = df.copy()
-    first_col = df.columns[0]
-    df = df.rename(columns={first_col: "Date"})
+    df = df.rename(columns={df.columns[0]: "Date"})
 
-    # Parsing dates robuste
     def parse_date(x):
         if pd.isna(x):
             return np.nan
@@ -151,7 +117,6 @@ def tidy_runs_df(df: pd.DataFrame) -> pd.DataFrame:
 
     value_cols = [c for c in df.columns if c != "Date"]
     long_df = df.melt(id_vars="Date", value_vars=value_cols, var_name="Country", value_name="Value")
-
     long_df["Value"] = pd.to_numeric(long_df["Value"], errors="coerce")
     long_df = long_df.dropna(subset=["Value"])
 
@@ -159,10 +124,12 @@ def tidy_runs_df(df: pd.DataFrame) -> pd.DataFrame:
     long_df["Month"] = long_df["Date"].dt.month.astype(int)
     long_df["MonthLabel"] = pd.Categorical(
         long_df["Date"].dt.strftime("%b"),
-        categories=["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+        categories=["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
         ordered=True,
     )
+
+    # filtre années demandées
+    long_df = long_df[(long_df["Year"] >= YEAR_MIN) & (long_df["Year"] <= YEAR_MAX)]
 
     return long_df.sort_values(["Country", "Year", "Month"]).reset_index(drop=True)
 
@@ -170,10 +137,16 @@ def tidy_runs_df(df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 # Tracés
 # =========================
+def _style_for_year(year: int, idx_other: int) -> dict:
+    """Retourne couleur/épaisseur/opacité selon l'année."""
+    if year in HIGHLIGHT_COLORS:
+        return {"color": HIGHLIGHT_COLORS[year], "width": 2.8, "opacity": 1.0, "marker": 6}
+    # autres années (2020–2023 typiquement) -> couleurs douces variées
+    color = MUTED_PALETTE[idx_other % len(MUTED_PALETTE)]
+    return {"color": color, "width": 1.5, "opacity": 0.55, "marker": 4}
+
+
 def plot_country_seasonal(long_df: pd.DataFrame, country: str, unit: str | None = None) -> go.Figure:
-    """
-    Seasonal Jan→Déc, une ligne par année pour un pays donné.
-    """
     d = long_df[long_df["Country"] == country]
     fig = go.Figure()
 
@@ -181,25 +154,33 @@ def plot_country_seasonal(long_df: pd.DataFrame, country: str, unit: str | None 
         fig.update_layout(title=f"{country} — (aucune donnée)", template="plotly_white", height=300)
         return fig
 
-    pivot = d.pivot_table(index="Month", columns="Year", values="Value",
-                          aggfunc="mean").sort_index()
+    # on garde l'ordre croissant des années
+    years = sorted(d["Year"].unique().tolist())
+    other_idx = 0
 
-    for year in pivot.columns:
+    for y in years:
+        sty = _style_for_year(y, other_idx)
+        if y not in HIGHLIGHT_COLORS:
+            other_idx += 1
+
+        y_data = d[d["Year"] == y].set_index("Month").reindex(range(1, 13))["Value"].values
         fig.add_trace(
             go.Scatter(
                 x=list(range(1, 13)),
-                y=pivot[year].reindex(range(1, 13)).values,
+                y=y_data,
                 mode="lines+markers",
-                name=str(year),
+                name=str(y),
                 connectgaps=True,
+                line=dict(color=sty["color"], width=sty["width"]),
+                marker=dict(size=sty["marker"], color=sty["color"]),
+                opacity=sty["opacity"],
             )
         )
 
     fig.update_xaxes(
         tickmode="array",
         tickvals=list(range(1, 13)),
-        ticktext=["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+        ticktext=["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
         showgrid=False,
         zeroline=False,
     )
@@ -224,52 +205,36 @@ def plot_region_seasonals(long_df: pd.DataFrame, countries: List[str], unit: str
 def run_litasco_runs_tab():
     st.subheader("Litasco runs – Seasonals par pays")
 
-    # Sélecteur de région
+    # Région
     region = st.radio("Région", ["NWE", "MED"], horizontal=True)
 
-    # Choix automatique + override manuel
-    with st.expander("📁 Fichier utilisé (auto: plus récent)"):
-        st.caption(f"Dossier UNC : {RUNS_DIR}")
-        st.caption(f"Dossier local du repo : {REPO_RUNS_DIR}")
-        if not _is_windows() and (RUNS_DIR.startswith("\\") or RUNS_DIR.startswith("//")):
-            st.warning(
-                "Chemin UNC détecté sur un runtime non-Windows : peut ne pas être accessible.\n"
-                "➡️ Le code tentera d'utiliser le repo local, puis la pièce jointe."
-            )
-        override = st.text_input(
-            "Override (chemin/nom de fichier .xls/.xlsx)",
-            value="",
-            help="Laisse vide pour auto-pick"
-        )
-        try:
-            xlsx_path = Path(override) if override.strip() else pick_latest_runs_file()
-            st.info(f"Fichier choisi : **{xlsx_path.name}**")
-        except Exception as e:
-            st.error(str(e))
-            st.stop()
+    # Choix automatique du dernier fichier (plus d'expander/override)
+    try:
+        xlsx_path = pick_latest_runs_file()
+        st.caption(f"Fichier utilisé : **{xlsx_path.name}**")
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
 
-    # Chargement du classeur
+    # Chargement & sélection de feuille
     try:
         wb = load_runs_workbook(xlsx_path)
     except Exception as e:
         st.exception(e)
         st.stop()
 
-    # Feuille selon région
     sheet_name, df_region = _pick_region_sheet(wb, region)
     st.caption(f"Feuille utilisée pour {region} : **{sheet_name}**")
 
     # Mise en forme
     long_df = tidy_runs_df(df_region)
 
-    # Unité (optionnelle)
+    # Unité + pays
     unit = st.text_input("Unité (axe Y)", value="", help="ex: kb/d (optionnel)")
-
-    # Pays à afficher
     all_countries = sorted(long_df["Country"].unique().tolist())
     selected = st.multiselect("Pays à afficher", all_countries, default=all_countries)
 
-    # Affichage en grille 3 colonnes
+    # Affichage en grille
     cols = st.columns(3)
     for i, country in enumerate(selected):
         fig = plot_country_seasonal(long_df, country, unit=unit)
