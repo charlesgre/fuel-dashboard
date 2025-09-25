@@ -18,6 +18,7 @@ from technical_analysis_tab import render as render_technical
 from arbs_tab import render as render_arbs
 from sg_imports_tab import render_sg_imports_tab
 from litasco_supply_tab import run_litasco_supply_tab
+from litasco_runs import run_litasco_runs_tab
 
 # ---- Secrets / .env helpers (robust even if secrets.toml isn't auto-loaded) ----
 from typing import Optional
@@ -181,8 +182,10 @@ with tab3:
 with tab4:
     st.header("Balances")
 
-    # Sous-onglets : FGE/EA existant + nouveau 'Litasco supply'
-    subtab_fge_ea, subtab_litasco = st.tabs(["FGE / EA", "Litasco supply"])
+    # Sous-onglets : FGE/EA + Litasco supply + Litasco runs
+    subtab_fge_ea, subtab_litasco_supply, subtab_litasco_runs = st.tabs(
+        ["FGE / EA", "Litasco supply", "Litasco runs"]
+    )
 
     # -------------------- FGE / EA (inchangé) --------------------
     with subtab_fge_ea:
@@ -256,10 +259,14 @@ with tab4:
                                     key=f"ea_{metric}_{grade}_{i}")
                 col_idx = (col_idx + 1) % 3
 
-    # -------------------- Litasco supply (NWE / MED ready) --------------------
-    with subtab_litasco:
-        # Cette fonction affiche toute l’UI (sélecteur NWE/MED, chemins, génération, email, CSV, etc.)
+    # -------------------- Litasco supply (existant) --------------------
+    with subtab_litasco_supply:
+        # UI supply (NWE/MED, export, etc.)
         run_litasco_supply_tab()
+
+    # -------------------- Litasco runs (NWE / MED) — NOUVEAU --------------------
+    with subtab_litasco_runs:
+        run_litasco_runs_tab()
 
 
 # === TAB 5: FORWARD CURVES ===
