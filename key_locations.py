@@ -459,7 +459,7 @@ def render_key_locations_export():
 
     location = st.selectbox(
         "Location",
-        ["Global Russian exports", "Iranian exports", "Iraqi exports"],
+        list(QUERY_BY_LOCATION.keys()),
         index=0
     )
     query_name = QUERY_BY_LOCATION[location]
