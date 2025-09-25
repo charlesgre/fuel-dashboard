@@ -13,14 +13,18 @@ import streamlit as st
 # =========================
 # Réglages / chemins
 # =========================
-# Dossier réseau où sont stockés les "Europe Runs Recap *.xls*"
+# 1) Dossier réseau (UNC)
 RUNS_DIR = r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\Litasco balances\Litasco supply"
-FILENAME_PREFIX = "Europe Runs Recap"
-# On accepte .xlsx et .xls (si .xls, xlrd doit être installé)
-FILENAME_GLOB = f"{FILENAME_PREFIX} *.xls*"
 
-# Fallback local (pièce jointe) si le partage n'est pas accessible
+# 2) Dossier local du repo (fallback si l'UNC n'est pas monté)
+REPO_RUNS_DIR = Path(__file__).resolve().parent / "Litasco balances" / "Litasco supply"
+
+# 3) Fichier joint local (dernier recours)
 FALLBACK_FILE = Path("/mnt/data/Europe Runs Recap 09.16.2025.xlsx")
+
+# Motif des fichiers (accepte .xlsx / .xls)
+FILENAME_PREFIX = "Europe Runs Recap"
+FILENAME_GLOB = f"{FILENAME_PREFIX} *.xls*"
 
 
 # =========================
@@ -30,35 +34,43 @@ def _is_windows() -> bool:
     return platform.system() == "Windows"
 
 
-def pick_latest_runs_file(base_dir: str | Path = RUNS_DIR) -> Path:
-    """
-    Retourne le fichier le plus récent correspondant au motif 'Europe Runs Recap *.xls*'.
-    Si rien n'est trouvé (ou partage inaccessible), tente FALLBACK_FILE.
-    """
-    base = Path(base_dir)
-    candidates: List[Path] = []
-
+def _latest_in(folder: Path) -> Path | None:
     try:
-        if base.exists():
-            # trie par date de modif décroissante
-            candidates = sorted(
-                base.glob(FILENAME_GLOB),
+        if folder.exists():
+            files = sorted(
+                folder.glob(FILENAME_GLOB),
                 key=lambda p: p.stat().st_mtime,
-                reverse=True
+                reverse=True,
             )
+            if files:
+                return files[0]
     except Exception:
-        # ex: UNC non monté sur Linux
-        candidates = []
+        return None
+    return None
 
-    if candidates:
-        return candidates[0]
+
+def pick_latest_runs_file() -> Path:
+    """
+    Ordre de recherche :
+      1) UNC (RUNS_DIR)
+      2) Dossier local du repo (REPO_RUNS_DIR)
+      3) Fichier joint (FALLBACK_FILE)
+    """
+    p = _latest_in(Path(RUNS_DIR))
+    if p:
+        return p
+
+    p = _latest_in(REPO_RUNS_DIR)
+    if p:
+        return p
 
     if FALLBACK_FILE.exists():
         return FALLBACK_FILE
 
     raise FileNotFoundError(
-        f"Aucun fichier trouvé dans {base_dir} avec le motif '{FILENAME_GLOB}' "
-        f"et fallback absent : {FALLBACK_FILE}"
+        f"Aucun fichier {FILENAME_GLOB} trouvé dans:\n"
+        f"- UNC: {RUNS_DIR}\n- Repo: {REPO_RUNS_DIR}\n"
+        f"et fallback absent: {FALLBACK_FILE}"
     )
 
 
@@ -68,75 +80,64 @@ def pick_latest_runs_file(base_dir: str | Path = RUNS_DIR) -> Path:
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_runs_workbook(xlsx_path: Path) -> Dict[str, pd.DataFrame]:
     """
-    Lit le classeur et renvoie {sheet_name: DataFrame}, en nettoyant les lignes/colonnes vides.
-    Supporte .xlsx (openpyxl) et .xls (xlrd si installé).
+    Lit le classeur et renvoie {sheet_name: DataFrame}, après nettoyage (lignes/colonnes vides).
+    Supporte .xlsx (openpyxl) et .xls (xlrd pour .xls uniquement).
     """
     suffix = xlsx_path.suffix.lower()
     engine = None
     if suffix == ".xlsx":
         engine = "openpyxl"
     elif suffix == ".xls":
-        # xlrd n'ouvre plus les .xlsx ; pour .xls il faut xlrd<=2.0
-        engine = "xlrd"
+        engine = "xlrd"  # nécessite xlrd compatible .xls
 
     try:
         wb = pd.read_excel(xlsx_path, sheet_name=None, engine=engine)
     except Exception as e:
         if suffix == ".xls":
             raise RuntimeError(
-                "Échec de lecture .xls. Assure-toi que 'xlrd' est installé et compatible pour les fichiers .xls."
+                "Lecture .xls impossible. Installe 'xlrd' compatible .xls ou convertis en .xlsx."
             ) from e
         raise
 
-    # Nettoyage léger
     cleaned: Dict[str, pd.DataFrame] = {}
     for sh, df in wb.items():
-        df2 = df.dropna(axis=0, how="all").dropna(axis=1, how="all")
-        cleaned[sh] = df2
+        cleaned[sh] = df.dropna(axis=0, how="all").dropna(axis=1, how="all")
     return cleaned
 
 
 def _pick_region_sheet(wb: Dict[str, pd.DataFrame], region: str) -> Tuple[str, pd.DataFrame]:
     """
     region ∈ {'NWE','MED'}.
-    Si des feuilles 'NWE'/'MED' existent -> on les prend.
+    Si des feuilles 'NWE' / 'MED' existent -> on les prend.
     Sinon: 1ère feuille = NWE, 2ème = MED.
     """
     keys = list(wb.keys())
     if not keys:
         raise ValueError("Classeur vide : aucune feuille détectée.")
-
-    lower_map = {k.lower(): k for k in keys}
+    lower = {k.lower(): k for k in keys}
     if region.upper() == "NWE":
-        if "nwe" in lower_map:
-            sh = lower_map["nwe"]
-        else:
-            sh = keys[0]
+        sh = lower.get("nwe", keys[0])
     else:
-        if "med" in lower_map:
-            sh = lower_map["med"]
-        else:
-            sh = keys[1] if len(keys) > 1 else keys[0]
+        sh = lower.get("med", keys[1] if len(keys) > 1 else keys[0])
     return sh, wb[sh]
 
 
 def tidy_runs_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Format attendu :
-      - 1ère colonne = dates mensuelles -> 'Date'
-      - 1ère ligne = noms de pays pour les autres colonnes
-    Sortie long format : [Date, Year, Month, MonthLabel, Country, Value]
+    Entrée wide:
+      - 1ère colonne = dates -> 'Date'
+      - colonnes suivantes = pays
+    Sortie long:
+      [Date, Year, Month, MonthLabel, Country, Value]
     """
     if df.empty:
         return pd.DataFrame(columns=["Date", "Year", "Month", "MonthLabel", "Country", "Value"])
 
     df = df.copy()
-
-    # Renommer la 1ère colonne en 'Date'
     first_col = df.columns[0]
     df = df.rename(columns={first_col: "Date"})
 
-    # Parsing dates tolérant (Jan-2023, 2023-01, Jan23, etc.)
+    # Parsing dates robuste
     def parse_date(x):
         if pd.isna(x):
             return np.nan
@@ -148,11 +149,9 @@ def tidy_runs_df(df: pd.DataFrame) -> pd.DataFrame:
     df["Date"] = df["Date"].map(parse_date)
     df = df[df["Date"].notna()].copy()
 
-    # Wide -> long
     value_cols = [c for c in df.columns if c != "Date"]
     long_df = df.melt(id_vars="Date", value_vars=value_cols, var_name="Country", value_name="Value")
 
-    # Nettoyage / dérivées
     long_df["Value"] = pd.to_numeric(long_df["Value"], errors="coerce")
     long_df = long_df.dropna(subset=["Value"])
 
@@ -182,10 +181,9 @@ def plot_country_seasonal(long_df: pd.DataFrame, country: str, unit: str | None 
         fig.update_layout(title=f"{country} — (aucune donnée)", template="plotly_white", height=300)
         return fig
 
-    # Pivot index=Month, columns=Year, values=Value
-    pivot = d.pivot_table(index="Month", columns="Year", values="Value", aggfunc="mean").sort_index()
+    pivot = d.pivot_table(index="Month", columns="Year", values="Value",
+                          aggfunc="mean").sort_index()
 
-    # Courbes par année
     for year in pivot.columns:
         fig.add_trace(
             go.Scatter(
@@ -229,22 +227,22 @@ def run_litasco_runs_tab():
     # Sélecteur de région
     region = st.radio("Région", ["NWE", "MED"], horizontal=True)
 
-    # Choix automatique du fichier + override manuel
+    # Choix automatique + override manuel
     with st.expander("📁 Fichier utilisé (auto: plus récent)"):
-        st.caption(f"Dossier: {RUNS_DIR}")
+        st.caption(f"Dossier UNC : {RUNS_DIR}")
+        st.caption(f"Dossier local du repo : {REPO_RUNS_DIR}")
         if not _is_windows() and (RUNS_DIR.startswith("\\") or RUNS_DIR.startswith("//")):
             st.warning(
                 "Chemin UNC détecté sur un runtime non-Windows : peut ne pas être accessible.\n"
-                "➡️ Monte le partage réseau ou utilise l’override ci-dessous."
+                "➡️ Le code tentera d'utiliser le repo local, puis la pièce jointe."
             )
         override = st.text_input(
             "Override (chemin/nom de fichier .xls/.xlsx)",
             value="",
             help="Laisse vide pour auto-pick"
         )
-
         try:
-            xlsx_path = Path(override) if override.strip() else pick_latest_runs_file(RUNS_DIR)
+            xlsx_path = Path(override) if override.strip() else pick_latest_runs_file()
             st.info(f"Fichier choisi : **{xlsx_path.name}**")
         except Exception as e:
             st.error(str(e))
@@ -270,12 +268,6 @@ def run_litasco_runs_tab():
     # Pays à afficher
     all_countries = sorted(long_df["Country"].unique().tolist())
     selected = st.multiselect("Pays à afficher", all_countries, default=all_countries)
-
-    # (Optionnel) filtrage par années — décommente au besoin
-    # years = sorted(long_df["Year"].unique().tolist())
-    # sel_years = st.multiselect("Années", years, default=years)
-    # if sel_years:
-    #     long_df = long_df[long_df["Year"].isin(sel_years)]
 
     # Affichage en grille 3 colonnes
     cols = st.columns(3)
