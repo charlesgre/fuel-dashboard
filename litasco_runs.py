@@ -19,17 +19,19 @@ FALLBACK_FILE = Path("/mnt/data/Europe Runs Recap 09.16.2025.xlsx")
 FILENAME_PREFIX = "Europe Runs Recap"
 FILENAME_GLOB = f"{FILENAME_PREFIX} *.xls*"
 
-# années à afficher
+# Années à afficher
 YEAR_MIN, YEAR_MAX = 2020, 2026
+# Années utilisées pour le "range" (ruban min–max)
+BASE_RANGE_YEARS = [2020, 2021, 2022, 2023, 2024]
+
+# Couleurs mises en avant
 HIGHLIGHT_COLORS = {
     2024: "#2ca02c",  # vert
     2025: "#000000",  # noir
     2026: "#d62728",  # rouge
 }
-MUTED_PALETTE = [
-    "#9ecae1", "#c7e9c0", "#fdd0a2", "#bcbddc", "#fdae6b", "#bdbdbd", "#c7c7c7"
-]  # tons doux
-
+# Palette douce pour les années ≤ 2023
+MUTED_PALETTE = ["#9ecae1", "#c7e9c0", "#fdd0a2", "#bcbddc", "#fdae6b", "#bdbdbd", "#c7c7c7"]
 
 # =========================
 # Utilitaires fichiers
@@ -37,21 +39,18 @@ MUTED_PALETTE = [
 def _is_windows() -> bool:
     return platform.system() == "Windows"
 
-
 def _latest_in(folder: Path) -> Path | None:
     try:
         if folder.exists():
-            files = sorted(folder.glob(FILENAME_GLOB),
-                           key=lambda p: p.stat().st_mtime, reverse=True)
+            files = sorted(folder.glob(FILENAME_GLOB), key=lambda p: p.stat().st_mtime, reverse=True)
             if files:
                 return files[0]
     except Exception:
         return None
     return None
 
-
 def pick_latest_runs_file() -> Path:
-    """Ordre de recherche: UNC -> repo local -> fallback /mnt/data"""
+    """Ordre de recherche: UNC -> repo local -> fallback /mnt/data."""
     p = _latest_in(Path(RUNS_DIR))
     if p:
         return p
@@ -61,18 +60,16 @@ def pick_latest_runs_file() -> Path:
     if FALLBACK_FILE.exists():
         return FALLBACK_FILE
     raise FileNotFoundError(
-        f"Aucun fichier {FILENAME_GLOB} trouvé dans:\n"
-        f"- UNC: {RUNS_DIR}\n- Repo: {REPO_RUNS_DIR}\n"
+        f"Aucun fichier {FILENAME_GLOB} trouvé dans:\n- UNC: {RUNS_DIR}\n- Repo: {REPO_RUNS_DIR}\n"
         f"et fallback absent: {FALLBACK_FILE}"
     )
-
 
 # =========================
 # Chargement & préparation
 # =========================
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_runs_workbook(xlsx_path: Path) -> Dict[str, pd.DataFrame]:
-    """Lit le classeur et renvoie {sheet_name: DataFrame}."""
+    """Lit le classeur et renvoie {sheet_name: DataFrame} nettoyés."""
     suffix = xlsx_path.suffix.lower()
     engine = "openpyxl" if suffix == ".xlsx" else ("xlrd" if suffix == ".xls" else None)
     try:
@@ -82,7 +79,6 @@ def load_runs_workbook(xlsx_path: Path) -> Dict[str, pd.DataFrame]:
             raise RuntimeError("Lecture .xls impossible (installe xlrd compatible .xls ou convertis en .xlsx).") from e
         raise
     return {sh: df.dropna(axis=0, how="all").dropna(axis=1, how="all") for sh, df in wb.items()}
-
 
 def _pick_region_sheet(wb: Dict[str, pd.DataFrame], region: str) -> Tuple[str, pd.DataFrame]:
     keys = list(wb.keys())
@@ -95,9 +91,8 @@ def _pick_region_sheet(wb: Dict[str, pd.DataFrame], region: str) -> Tuple[str, p
         sh = lower.get("med", keys[1] if len(keys) > 1 else keys[0])
     return sh, wb[sh]
 
-
 def tidy_runs_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Wide -> long avec colonnes dérivées (Year/Month/MonthLabel)."""
+    """Wide -> long + colonnes Year/Month/MonthLabel; filtre 2020→2026."""
     if df.empty:
         return pd.DataFrame(columns=["Date", "Year", "Month", "MonthLabel", "Country", "Value"])
 
@@ -128,23 +123,50 @@ def tidy_runs_df(df: pd.DataFrame) -> pd.DataFrame:
         ordered=True,
     )
 
-    # filtre années demandées
     long_df = long_df[(long_df["Year"] >= YEAR_MIN) & (long_df["Year"] <= YEAR_MAX)]
-
     return long_df.sort_values(["Country", "Year", "Month"]).reset_index(drop=True)
-
 
 # =========================
 # Tracés
 # =========================
 def _style_for_year(year: int, idx_other: int) -> dict:
-    """Retourne couleur/épaisseur/opacité selon l'année."""
+    """Couleur/épaisseur/opacité selon l'année."""
     if year in HIGHLIGHT_COLORS:
-        return {"color": HIGHLIGHT_COLORS[year], "width": 2.8, "opacity": 1.0, "marker": 6}
-    # autres années (2020–2023 typiquement) -> couleurs douces variées
+        return {"color": HIGHLIGHT_COLORS[year], "width": 3.0, "opacity": 1.0, "marker": 6}
+    # ≤ 2023 : un peu plus épais que les autres muted, mais estompés
     color = MUTED_PALETTE[idx_other % len(MUTED_PALETTE)]
-    return {"color": color, "width": 1.5, "opacity": 0.55, "marker": 4}
+    width = 1.8 if year <= 2023 else 1.5
+    return {"color": color, "width": width, "opacity": 0.55, "marker": 4}
 
+def _add_range_band(fig: go.Figure, d: pd.DataFrame, base_years: List[int]) -> None:
+    """
+    Ajoute un ruban min–max (range) calculé sur base_years, par mois.
+    Tracé: une courbe 'min' (invisible) + une courbe 'max' avec fill='tonexty'.
+    """
+    d_base = d[d["Year"].isin(base_years)]
+    if d_base.empty:
+        return
+
+    # Tableau 12 mois pour min/max (avec reindex 1..12)
+    pivot = d_base.pivot_table(index="Month", columns="Year", values="Value", aggfunc="mean")
+    months = list(range(1, 13))
+    min_vals = pivot.reindex(months).min(axis=1).values
+    max_vals = pivot.reindex(months).max(axis=1).values
+
+    band_color = "rgba(31,119,180,0.14)"   # bleu doux transparent
+    edge_color = "rgba(31,119,180,0.40)"
+
+    # bas (pas dans la légende)
+    fig.add_trace(go.Scatter(
+        x=months, y=min_vals, mode="lines", line=dict(color=edge_color, width=0.5),
+        hoverinfo="skip", showlegend=False, name="min 2020–2024"
+    ))
+    # haut (affiche la légende + remplissage)
+    fig.add_trace(go.Scatter(
+        x=months, y=max_vals, mode="lines", line=dict(color=edge_color, width=0.5),
+        fill="tonexty", fillcolor=band_color,
+        name="Range 2020–2024", hoverinfo="skip"
+    ))
 
 def plot_country_seasonal(long_df: pd.DataFrame, country: str, unit: str | None = None) -> go.Figure:
     d = long_df[long_df["Country"] == country]
@@ -154,35 +176,33 @@ def plot_country_seasonal(long_df: pd.DataFrame, country: str, unit: str | None 
         fig.update_layout(title=f"{country} — (aucune donnée)", template="plotly_white", height=300)
         return fig
 
-    # on garde l'ordre croissant des années
+    # Ruban de range 2020–2024 (dessiné d'abord pour rester en arrière-plan)
+    _add_range_band(fig, d, BASE_RANGE_YEARS)
+
+    # Lignes par année (dans l'ordre croissant)
     years = sorted(d["Year"].unique().tolist())
     other_idx = 0
-
     for y in years:
         sty = _style_for_year(y, other_idx)
         if y not in HIGHLIGHT_COLORS:
             other_idx += 1
-
         y_data = d[d["Year"] == y].set_index("Month").reindex(range(1, 13))["Value"].values
-        fig.add_trace(
-            go.Scatter(
-                x=list(range(1, 13)),
-                y=y_data,
-                mode="lines+markers",
-                name=str(y),
-                connectgaps=True,
-                line=dict(color=sty["color"], width=sty["width"]),
-                marker=dict(size=sty["marker"], color=sty["color"]),
-                opacity=sty["opacity"],
-            )
-        )
+        fig.add_trace(go.Scatter(
+            x=list(range(1, 13)),
+            y=y_data,
+            mode="lines+markers",
+            name=str(y),
+            connectgaps=True,
+            line=dict(color=sty["color"], width=sty["width"]),
+            marker=dict(size=sty["marker"], color=sty["color"]),
+            opacity=sty["opacity"],
+        ))
 
     fig.update_xaxes(
         tickmode="array",
         tickvals=list(range(1, 13)),
         ticktext=["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
-        showgrid=False,
-        zeroline=False,
+        showgrid=False, zeroline=False,
     )
     fig.update_yaxes(title_text=(unit or ""), rangemode="tozero")
     fig.update_layout(
@@ -194,10 +214,8 @@ def plot_country_seasonal(long_df: pd.DataFrame, country: str, unit: str | None 
     )
     return fig
 
-
 def plot_region_seasonals(long_df: pd.DataFrame, countries: List[str], unit: str | None) -> Dict[str, go.Figure]:
     return {c: plot_country_seasonal(long_df, c, unit=unit) for c in countries}
-
 
 # =========================
 # UI Streamlit
@@ -208,20 +226,18 @@ def run_litasco_runs_tab():
     # Région
     region = st.radio("Région", ["NWE", "MED"], horizontal=True)
 
-    # Choix automatique du dernier fichier (plus d'expander/override)
+    # Fichier (auto)
     try:
         xlsx_path = pick_latest_runs_file()
-        st.caption(f"Fichier utilisé : **{xlsx_path.name}**")
+        st.caption(f"Fichier utilisé : **{xlsx_path.name}** — Zone ombrée = range 2020–2024 ; années affichées 2020–2026.")
     except Exception as e:
-        st.error(str(e))
-        st.stop()
+        st.error(str(e)); st.stop()
 
     # Chargement & sélection de feuille
     try:
         wb = load_runs_workbook(xlsx_path)
     except Exception as e:
-        st.exception(e)
-        st.stop()
+        st.exception(e); st.stop()
 
     sheet_name, df_region = _pick_region_sheet(wb, region)
     st.caption(f"Feuille utilisée pour {region} : **{sheet_name}**")
