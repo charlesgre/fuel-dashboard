@@ -20,20 +20,24 @@ import plotly.graph_objects as go  # NEW
 
 
 def _canon(s: str) -> str:
+    """Normalise une chaîne (accents -> ASCII, casse insensible, trim)."""
     if not s:
         return ""
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.casefold().strip()
 
+
 CANON_PREFERRED = {
     _canon("Turkey"):  "Turkey",
     _canon("Turkiye"): "Turkey",
     _canon("Türkiye"): "Turkey",
-    # (au besoin, d’autres équivalences)
+    # (ajouter d’autres équivalences si besoin)
 }
 
+
 def harmonize_country_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Renomme les colonnes pays vers une forme préférée (ex: Turkiye -> Turkey)."""
     ren = {}
     for col in df.columns:
         c = _canon(col)
@@ -42,25 +46,30 @@ def harmonize_country_cols(df: pd.DataFrame) -> pd.DataFrame:
             ren[col] = pref
     return df.rename(columns=ren)
 
+
 def _get_secret(name: str) -> str | None:
-    """Try Streamlit secrets first, then environment variables."""
+    """Essaye d’abord st.secrets, puis les variables d’environnement."""
     try:
         v = st.secrets.get(name)
     except Exception:
         v = None
     return v or os.getenv(name)
 
-# mêmes couleurs que Matplotlib tab10 (bleu, orange, vert, rouge, …)
-TAB10 = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
-         '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
-# mêmes couleurs pour les “unknown”
+# Palette tab10 (bleu, orange, vert, rouge, …)
+TAB10 = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+    "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+]
+
+# Couleur uniformisée pour les catégories “unknown”
 COLOR_MAP = {
     "Other": "#7f7f7f",
     "Not Known": "#7f7f7f",
-    "Unknown": "#7f7f7f",        # au cas où
-    "Unknown Asia": "#7f7f7f",    # utile pour l’onglet Iran
+    "Unknown": "#7f7f7f",
+    "Unknown Asia": "#7f7f7f",  # utile pour l’onglet Iran
 }
+
 
 # --- (Optionnel) charger un .env ---
 try:
@@ -69,16 +78,18 @@ try:
 except Exception:
     pass
 
+
 # === Variables d'environnement à définir ===
 API_URL = "https://secure.petro-logistics.com/api/v3/movementsdata"
 
 
 # === Mapping des jeux de données par "location" ===
-# ⚠️ Remplace <QUERY_IRAN>/<QUERY_IRAQ> par les bons query_name Petro-Logistics
 QUERY_BY_LOCATION = {
     "Global Russian exports": "FSU_FO_2023_P31",
     "Iranian exports": "Iran_FO_2023_P5",
     "Iraqi exports": "Iraq_FO_2023_P5",
+    "Mexican exports": "Mexico_FO_2023_P5",
+    "Venezuelan exports": "Venezuela_FO_2023_P5",
 }
 
 
@@ -87,10 +98,10 @@ DEFAULT_COUNTRIES = {
     "Global Russian exports": [
         "India", "China", "Egypt", "Saudi Arabia",
         "Malaysia", "Singapore", "United Arab Emirates",
-        "Turkey", "Greece", "Not Known"   # <-- Greece ajouté
+        "Turkey", "Greece", "Not Known"
     ],
 
-    # 🔹 Iran — on cible exactement cette liste (l’ordre est respecté)
+    # 🔹 Iran — liste ciblée (ordre préservé)
     "Iranian exports": [
         "United Arab Emirates",
         "Singapore",
@@ -100,24 +111,46 @@ DEFAULT_COUNTRIES = {
         "Floating storage",
     ],
 
-    # 🔹 Irak — on cible exactement cette liste
-    "Iraqi exports": ["Malaysia", "United Arab Emirates", "Egypt", "U.S.A.", "Singapore", "Not known"],
+    # 🔹 Irak — liste ciblée
+    "Iraqi exports": [
+        "Malaysia", "United Arab Emirates", "Egypt", "U.S.A.", "Singapore", "Not known"
+    ],
+
+    # 🔹 Mexique — point de départ pratique (à adapter)
+    "Mexican exports": [
+        "U.S.A.", "Panama", "Brazil", "Chile", "Peru",
+        "Netherlands", "Spain", "Not known"
+    ],
+
+    # 🔹 Venezuela — point de départ pratique (à adapter)
+    "Venezuelan exports": [
+        "China", "Malaysia", "Singapore", "Cuba",
+        "United Arab Emirates", "Greece", "Turkey",
+        "Floating storage", "Not known"
+    ],
 }
 
-# Pour faire correspondre les libellés "côté utilisateur" aux noms réels des colonnes PL
+
+# Pour faire correspondre les libellés “UI” aux noms réels des colonnes PL
 COUNTRY_ALIASES = {
     "U.S.A.": "United States",
     "USA": "United States",
     "UAE": "United Arab Emirates",
     "UK": "United Kingdom",
     "Turkey": "Turkiye",
-    "Not Known": "Not known",   # <--- important
+    "Not Known": "Not known",   # <--- important (casse/espaces)
 }
 
+
 def _resolve_in_df(df_cols, requested):
-    """Retourne (colonnes_existantes, labels_pour_legende, manquants)."""
+    """
+    Retourne (colonnes_existantes, labels_pour_legende, manquants).
+    - df_cols: colonnes du DataFrame (noms de pays tels que renvoyés par l’API)
+    - requested: labels “côté UI” (potentiellement aliasés)
+    """
     canon_to_real = {_canon(c): c for c in df_cols}
     plot_cols, labels, missing = [], [], []
+
     for r in requested:
         # on essaie le libellé demandé et son alias éventuel
         candidates = [r, COUNTRY_ALIASES.get(r, r)]
@@ -132,9 +165,8 @@ def _resolve_in_df(df_cols, requested):
             labels.append(r)         # mais on affiche le label demandé
         else:
             missing.append(r)
+
     return plot_cols, labels, missing
-
-
 
 
 # === Utils ===
