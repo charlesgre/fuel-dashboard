@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from calendar import monthrange
+import os
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,10 @@ import plotly.graph_objects as go
 
 # === FICHIER SOURCE FIXE (comme dans les autres onglets) ===
 # -> Place TON fichier ici :  <repo>/Long short VGO/Long-short VGO master.xlsx
-XLSX_PATH = Path(__file__).resolve().parent / "Long short VGO" / "Long-short VGO master.xlsx"
+REPO_DIR = Path(__file__).resolve().parent
+DEFAULT_DIR = REPO_DIR / "Long short VGO"
+DEFAULT_FILE = "Long-short VGO master.xlsx"  # respecte la casse et le tiret
+XLSX_PATH = DEFAULT_DIR / DEFAULT_FILE
 SHEET_NAME = "Query1"
 
 # --- listes sweet / sour (fournies) ---
@@ -80,6 +84,45 @@ def _vgo_yield(crude: Optional[str]) -> float:
     if crude == "sour":
         return 0.30
     return np.nan
+
+
+# ------------- path picking (robuste) -------------
+def _pick_xlsx_path(default_excel_path: Optional[str]) -> Path:
+    """
+    Ordre de résolution :
+      1) paramètre default_excel_path (si fourni et existe)
+      2) variable d'env/secret VGO_XLSX_PATH (si existe)
+      3) chemin fixe (Long short VGO/Long-short VGO master.xlsx)
+      4) recherche tolérante dans le repo
+    Retourne le chemin (existant ou attendu pour message).
+    """
+    # 1) paramètre
+    if default_excel_path:
+        p = Path(default_excel_path)
+        if p.exists():
+            return p
+
+    # 2) env
+    env_p = os.getenv("VGO_XLSX_PATH", "").strip()
+    if env_p:
+        p = Path(env_p)
+        if p.exists():
+            return p
+
+    # 3) chemin fixe
+    if XLSX_PATH.exists():
+        return XLSX_PATH
+
+    # 4) recherche tolérante
+    candidates = list(REPO_DIR.rglob(DEFAULT_FILE))
+    if candidates:
+        return candidates[0]
+    partial = list(REPO_DIR.rglob("*VGO*master*.xlsx"))
+    if partial:
+        return partial[0]
+
+    # sinon, renvoie le chemin attendu
+    return XLSX_PATH
 
 
 # ------------- data loading / compute -------------
@@ -165,16 +208,24 @@ def _compute_month_view(
 
 
 # ------------- UI -------------
-def render_long_short_vgo_tab(_: Optional[str] = None) -> None:
+def render_long_short_vgo_tab(default_excel_path: Optional[str] = None) -> None:
+    """
+    Paramètre gardé pour compatibilité avec app.py : si fourni, il sert d'override.
+    """
     st.subheader("VGO Long / Short — NWE (TARS-aware)")
 
-    # Vérif chemin FIXE (comme les autres onglets)
-    if not XLSX_PATH.exists():
+    xlsx = _pick_xlsx_path(default_excel_path)
+    st.caption(f"🔎 Excel utilisé/attendu : **{xlsx}**")
+
+    if not xlsx.exists():
         st.error(
-            "Fichier Excel introuvable.\n\n"
-            f"Attendu ici : **{XLSX_PATH}**\n\n"
-            "➡️ Crée le dossier *Long short VGO* à côté de ce module "
-            "et dépose **Long-short VGO master.xlsx** dedans (onglet `Query1`)."
+            "Fichier Excel introuvable pour ce runtime.\n\n"
+            f"Chemin attendu : **{XLSX_PATH}**\n\n"
+            "✅ Solutions :\n"
+            "• Place le fichier dans *Long short VGO/Long-short VGO master.xlsx* (même casse),\n"
+            "• ou fournis un chemin via l’argument `default_excel_path` dans app.py,\n"
+            "• ou définis la variable d’environnement **VGO_XLSX_PATH** pointant vers le fichier.\n"
+            "ℹ️ Les chemins UNC Windows (\\\\serveur\\... ) ne sont pas visibles depuis un runtime Linux/Cloud."
         )
         return
 
@@ -195,7 +246,7 @@ def render_long_short_vgo_tab(_: Optional[str] = None) -> None:
 
     # Calcul
     try:
-        df_month, df_tars = _compute_month_view(str(XLSX_PATH), rotterdam_target, int(year), int(month))
+        df_month, df_tars = _compute_month_view(str(xlsx), rotterdam_target, int(year), int(month))
     except Exception as e:
         st.error("Impossible de calculer la vue mensuelle.")
         with st.expander("Traceback"):
