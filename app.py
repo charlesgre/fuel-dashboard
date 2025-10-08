@@ -19,6 +19,7 @@ from arbs_tab import render as render_arbs
 from sg_imports_tab import render_sg_imports_tab
 from litasco_supply_tab import run_litasco_supply_tab
 from litasco_runs import run_litasco_runs_tab
+from long_short_vgo_tab import render_long_short_vgo_tab
 
 # ---- Secrets / .env helpers (robust even if secrets.toml isn't auto-loaded) ----
 from typing import Optional
@@ -120,12 +121,12 @@ def get_ea_data_cached(_parser_version: str):
     return _load_ea_data()
 
 # ------------ Tabs ------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
     "📊 Prices", "⛽ Bunker Diff", "CDD/Temperatures",
     "Balances (FGE / EA / Litasco)", "📈 Forward Curves", "Platts Window",
     "📦 Fuel Stocks", "Gas vs Fuel", "🔍 Technical Analysis", "📑 Arbs",
-    "🇸🇬 SG hub tracking",  # 👈 NOUVEL ONGLET
-    "🌍 Key locations export"
+    "🇸🇬 SG hub tracking", "🌍 Key locations export",
+    "🛢️ VGO Long/Short"  # 👈 nouveau
 ])
 
 # === TAB 1: PRICES ===
@@ -330,3 +331,11 @@ with tab12:
     })
 
     render_key_locations_export()
+
+
+# === TAB 13: Long-Short VGO ===
+with tab13:
+    st.header("🛢️ VGO Long/Short — NWE (TARS-aware)")
+    # Laisse vide pour autodétection, ou force un chemin si nécessaire
+    default_vgo_excel = None  # ex: "Long short VGO/long-short VGO master.xlsx"
+    render_long_short_vgo_tab(default_excel_path=default_vgo_excel)
