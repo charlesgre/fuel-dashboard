@@ -22,16 +22,10 @@ FILENAME_GLOB = f"{FILENAME_PREFIX} *.xls*"
 
 # Années à afficher
 YEAR_MIN, YEAR_MAX = 2020, 2026
-# Années utilisées pour le "range" (ruban min–max)
 BASE_RANGE_YEARS = [2020, 2021, 2022, 2023, 2024]
 
 # Couleurs mises en avant
-HIGHLIGHT_COLORS = {
-    2024: "#2ca02c",  # vert
-    2025: "#000000",  # noir
-    2026: "#d62728",  # rouge
-}
-# Palette douce pour les années ≤ 2023
+HIGHLIGHT_COLORS = {2024: "#2ca02c", 2025: "#000000", 2026: "#d62728"}
 MUTED_PALETTE = ["#9ecae1", "#c7e9c0", "#fdd0a2", "#bcbddc", "#fdae6b", "#bdbdbd", "#c7c7c7"]
 
 # =========================
@@ -40,25 +34,34 @@ MUTED_PALETTE = ["#9ecae1", "#c7e9c0", "#fdd0a2", "#bcbddc", "#fdae6b", "#bdbdbd
 def _is_windows() -> bool:
     return platform.system() == "Windows"
 
-# Ex: "Europe Runs Recap 10.06.2025.xlsx" -> MM.DD.YYYY
-_DATE_RE = re.compile(
-    rf"{re.escape(FILENAME_PREFIX)}\s+(\d{{2}})\.(\d{{2}})\.(\d{{4}})",
-    re.IGNORECASE,
-)
+# Nouvelles regex : on supporte YYYY.MM.DD / YYYY-MM-DD ET MM.DD.YYYY / MM-DD-YYYY
+_DATE_RE_YMD = re.compile(r"(\d{4})[.\-](\d{2})[.\-](\d{2})")  # 2025.10.06 ou 2025-10-06
+_DATE_RE_MDY = re.compile(r"(\d{2})[.\-](\d{2})[.\-](\d{4})")  # 10.06.2025 ou 10-06-2025
 
 def _date_from_filename(p: Path) -> datetime | None:
-    """Extrait la date MM.DD.YYYY du nom de fichier si présente."""
-    m = _DATE_RE.search(p.name)
-    if not m:
-        return None
-    mm, dd, yyyy = map(int, m.groups())
-    try:
-        return datetime(yyyy, mm, dd)
-    except ValueError:
-        return None
+    """
+    Extrait une date depuis le nom de fichier.
+    Priorité au format YYYY.MM.DD / YYYY-MM-DD, puis fallback MM.DD.YYYY / MM-DD-YYYY.
+    """
+    s = p.name
+    m = _DATE_RE_YMD.search(s)
+    if m:
+        yyyy, mm, dd = map(int, m.groups())
+        try:
+            return datetime(yyyy, mm, dd)
+        except ValueError:
+            return None
+    m = _DATE_RE_MDY.search(s)
+    if m:
+        mm, dd, yyyy = map(int, m.groups())
+        try:
+            return datetime(yyyy, mm, dd)
+        except ValueError:
+            return None
+    return None
 
 def _sort_key(p: Path):
-    """Tri prioritaire par date du nom, puis par mtime."""
+    """Tri prioritaire par date du nom si trouvée, sinon très ancien; puis par mtime."""
     dt_name = _date_from_filename(p) or datetime(1900, 1, 1)
     try:
         mtime = p.stat().st_mtime
@@ -67,15 +70,16 @@ def _sort_key(p: Path):
     return (dt_name, mtime)
 
 def _candidates_in(folder: Path) -> List[Path]:
-    """Liste des fichiers candidats d’un dossier (sans fichiers temporaires)."""
+    """Liste des fichiers candidats d’un dossier (sans ~$.)."""
     if not folder.exists():
         return []
     return [p for p in Path(folder).glob(FILENAME_GLOB) if not p.name.startswith("~$")]
 
-def pick_latest_runs_file() -> Path:
+def pick_latest_runs_file(debug: bool = False) -> Path:
     """
-    Agrège UNC + repo local et retourne le fichier le plus récent au global.
-    Aucun fallback.
+    Agrège UNC + repo local et retourne le fichier le plus récent selon :
+    1) date dans le nom (YYYY.MM.DD / YYYY-MM-DD prioritaire; compat MM.DD.YYYY / MM-DD-YYYY)
+    2) mtime
     """
     folders = [Path(RUNS_DIR), REPO_RUNS_DIR]
     candidates: List[Path] = []
@@ -87,12 +91,34 @@ def pick_latest_runs_file() -> Path:
             f"Aucun fichier {FILENAME_GLOB} trouvé dans:\n- UNC: {RUNS_DIR}\n- Repo: {REPO_RUNS_DIR}"
         )
 
-    return max(candidates, key=_sort_key)
+    # Tri par (date extraite, mtime)
+    candidates.sort(key=_sort_key, reverse=True)
+    best = candidates[0]
+
+    if debug:
+        rows = []
+        for p in candidates:
+            try:
+                mtime = datetime.fromtimestamp(p.stat().st_mtime)
+            except Exception:
+                mtime = None
+            dt = _date_from_filename(p)
+            rows.append(
+                {
+                    "name": p.name,
+                    "folder": str(p.parent),
+                    "date_in_name": dt.strftime("%Y-%m-%d") if dt else "",
+                    "mtime": mtime.strftime("%Y-%m-%d %H:%M:%S") if mtime else "",
+                }
+            )
+        st.write("### Fichiers candidats (triés par date nom puis mtime)")
+        st.dataframe(pd.DataFrame(rows))
+
+    return best
 
 # =========================
 # Chargement & préparation
 # =========================
-# Le cache se casse automatiquement si le contenu (mtime) change.
 @st.cache_data(show_spinner=False, ttl=3600, hash_funcs={Path: lambda p: (p.as_posix(), p.stat().st_mtime)})
 def load_runs_workbook(xlsx_path: Path) -> Dict[str, pd.DataFrame]:
     """Lit le classeur et renvoie {sheet_name: DataFrame} nettoyés."""
@@ -166,7 +192,6 @@ def tidy_runs_df(df: pd.DataFrame) -> pd.DataFrame:
 # Tracés
 # =========================
 def _style_for_year(year: int, idx_other: int) -> dict:
-    """Couleur/épaisseur/opacité selon l'année."""
     if year in HIGHLIGHT_COLORS:
         return {"color": HIGHLIGHT_COLORS[year], "width": 3.0, "opacity": 1.0, "marker": 6}
     color = MUTED_PALETTE[idx_other % len(MUTED_PALETTE)]
@@ -181,30 +206,20 @@ def _add_range_band(fig: go.Figure, d: pd.DataFrame, base_years: List[int]) -> N
     months = list(range(1, 13))
     min_vals = pivot.reindex(months).min(axis=1).values
     max_vals = pivot.reindex(months).max(axis=1).values
-
     band_color = "rgba(31,119,180,0.14)"
     edge_color = "rgba(31,119,180,0.40)"
-
-    fig.add_trace(go.Scatter(
-        x=months, y=min_vals, mode="lines", line=dict(color=edge_color, width=0.5),
-        hoverinfo="skip", showlegend=False, name="min 2020–2024"
-    ))
-    fig.add_trace(go.Scatter(
-        x=months, y=max_vals, mode="lines", line=dict(color=edge_color, width=0.5),
-        fill="tonexty", fillcolor=band_color,
-        name="Range 2020–2024", hoverinfo="skip"
-    ))
+    fig.add_trace(go.Scatter(x=months, y=min_vals, mode="lines", line=dict(color=edge_color, width=0.5),
+                             hoverinfo="skip", showlegend=False, name="min 2020–2024"))
+    fig.add_trace(go.Scatter(x=months, y=max_vals, mode="lines", line=dict(color=edge_color, width=0.5),
+                             fill="tonexty", fillcolor=band_color, name="Range 2020–2024", hoverinfo="skip"))
 
 def plot_country_seasonal(long_df: pd.DataFrame, country: str, unit: str | None = None) -> go.Figure:
     d = long_df[long_df["Country"] == country]
     fig = go.Figure()
-
     if d.empty:
         fig.update_layout(title=f"{country} — (aucune donnée)", template="plotly_white", height=300)
         return fig
-
     _add_range_band(fig, d, BASE_RANGE_YEARS)
-
     years = sorted(d["Year"].unique().tolist())
     other_idx = 0
     for y in years:
@@ -212,31 +227,15 @@ def plot_country_seasonal(long_df: pd.DataFrame, country: str, unit: str | None 
         if y not in HIGHLIGHT_COLORS:
             other_idx += 1
         y_data = d[d["Year"] == y].set_index("Month").reindex(range(1, 13))["Value"].values
-        fig.add_trace(go.Scatter(
-            x=list(range(1, 13)),
-            y=y_data,
-            mode="lines+markers",
-            name=str(y),
-            connectgaps=True,
-            line=dict(color=sty["color"], width=sty["width"]),
-            marker=dict(size=sty["marker"], color=sty["color"]),
-            opacity=sty["opacity"],
-        ))
-
-    fig.update_xaxes(
-        tickmode="array",
-        tickvals=list(range(1, 13)),
-        ticktext=["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
-        showgrid=False, zeroline=False,
-    )
+        fig.add_trace(go.Scatter(x=list(range(1, 13)), y=y_data, mode="lines+markers", name=str(y),
+                                 connectgaps=True, line=dict(color=sty["color"], width=sty["width"]),
+                                 marker=dict(size=sty["marker"], color=sty["color"]), opacity=sty["opacity"]))
+    fig.update_xaxes(tickmode="array", tickvals=list(range(1, 13)),
+                     ticktext=["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+                     showgrid=False, zeroline=False)
     fig.update_yaxes(title_text=(unit or ""), rangemode="tozero")
-    fig.update_layout(
-        title=country,
-        legend_title_text="Année",
-        template="plotly_white",
-        height=320,
-        margin=dict(l=10, r=10, t=40, b=10),
-    )
+    fig.update_layout(title=country, legend_title_text="Année", template="plotly_white",
+                      height=320, margin=dict(l=10, r=10, t=40, b=10))
     return fig
 
 def plot_region_seasonals(long_df: pd.DataFrame, countries: List[str], unit: str | None) -> Dict[str, go.Figure]:
@@ -251,9 +250,12 @@ def run_litasco_runs_tab():
     # Région
     region = st.radio("Région", ["NWE", "MED"], horizontal=True)
 
+    # Debug (optionnel) pour voir la liste détectée
+    debug_files = st.toggle("Afficher la liste des fichiers détectés (debug)")
+
     # Fichier (auto)
     try:
-        xlsx_path = pick_latest_runs_file()
+        xlsx_path = pick_latest_runs_file(debug=debug_files)
         st.caption(
             f"Fichier utilisé : **{xlsx_path.name}** (dossier : {xlsx_path.parent}) — "
             "Zone ombrée = range 2020–2024 ; années affichées 2020–2026."
