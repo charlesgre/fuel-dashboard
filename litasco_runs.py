@@ -40,8 +40,11 @@ MUTED_PALETTE = ["#9ecae1", "#c7e9c0", "#fdd0a2", "#bcbddc", "#fdae6b", "#bdbdbd
 def _is_windows() -> bool:
     return platform.system() == "Windows"
 
-# Ex: "Europe Runs Recap 09.16.2025.xlsx" -> MM.DD.YYYY
-_DATE_RE = re.compile(rf"{re.escape(FILENAME_PREFIX)}\s+(\d{{2}})\.(\d{{2}})\.(\d{{4}})", re.IGNORECASE)
+# Ex: "Europe Runs Recap 10.06.2025.xlsx" -> MM.DD.YYYY
+_DATE_RE = re.compile(
+    rf"{re.escape(FILENAME_PREFIX)}\s+(\d{{2}})\.(\d{{2}})\.(\d{{4}})",
+    re.IGNORECASE,
+)
 
 def _date_from_filename(p: Path) -> datetime | None:
     """Extrait la date MM.DD.YYYY du nom de fichier si présente."""
@@ -54,35 +57,37 @@ def _date_from_filename(p: Path) -> datetime | None:
     except ValueError:
         return None
 
-def _latest_in(folder: Path) -> Path | None:
-    """Renvoie le fichier le plus récent en combinant date du nom & mtime. Ignore les ~$…"""
+def _sort_key(p: Path):
+    """Tri prioritaire par date du nom, puis par mtime."""
+    dt_name = _date_from_filename(p) or datetime(1900, 1, 1)
+    try:
+        mtime = p.stat().st_mtime
+    except Exception:
+        mtime = 0.0
+    return (dt_name, mtime)
+
+def _candidates_in(folder: Path) -> List[Path]:
+    """Liste des fichiers candidats d’un dossier (sans fichiers temporaires)."""
     if not folder.exists():
-        return None
-    candidates = [p for p in folder.glob(FILENAME_GLOB) if not p.name.startswith("~$")]
-    if not candidates:
-        return None
-
-    def sort_key(p: Path):
-        dt_name = _date_from_filename(p) or datetime(1900, 1, 1)
-        try:
-            mtime = p.stat().st_mtime
-        except Exception:
-            mtime = 0.0
-        return (dt_name, mtime)
-
-    return max(candidates, key=sort_key)
+        return []
+    return [p for p in Path(folder).glob(FILENAME_GLOB) if not p.name.startswith("~$")]
 
 def pick_latest_runs_file() -> Path:
-    """Ordre de recherche: UNC -> repo local. Pas de fallback."""
-    p = _latest_in(Path(RUNS_DIR))
-    if p:
-        return p
-    p = _latest_in(REPO_RUNS_DIR)
-    if p:
-        return p
-    raise FileNotFoundError(
-        f"Aucun fichier {FILENAME_GLOB} trouvé dans:\n- UNC: {RUNS_DIR}\n- Repo: {REPO_RUNS_DIR}"
-    )
+    """
+    Agrège UNC + repo local et retourne le fichier le plus récent au global.
+    Aucun fallback.
+    """
+    folders = [Path(RUNS_DIR), REPO_RUNS_DIR]
+    candidates: List[Path] = []
+    for f in folders:
+        candidates.extend(_candidates_in(f))
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"Aucun fichier {FILENAME_GLOB} trouvé dans:\n- UNC: {RUNS_DIR}\n- Repo: {REPO_RUNS_DIR}"
+        )
+
+    return max(candidates, key=_sort_key)
 
 # =========================
 # Chargement & préparation
@@ -249,7 +254,10 @@ def run_litasco_runs_tab():
     # Fichier (auto)
     try:
         xlsx_path = pick_latest_runs_file()
-        st.caption(f"Fichier utilisé : **{xlsx_path.name}** — Zone ombrée = range 2020–2024 ; années affichées 2020–2026.")
+        st.caption(
+            f"Fichier utilisé : **{xlsx_path.name}** (dossier : {xlsx_path.parent}) — "
+            "Zone ombrée = range 2020–2024 ; années affichées 2020–2026."
+        )
     except Exception as e:
         st.error(str(e)); st.stop()
 
