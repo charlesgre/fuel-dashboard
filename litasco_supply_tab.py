@@ -63,87 +63,152 @@ MONTH_TICKS = list(range(1, 13))
 MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
 # ================== IO helpers ==================
-_DATE_PAT = re.compile(r"(\d{2}[.\-]\d{2}[.\-]\d{4}|\d{8}|\d{4}-\d{2}-\d{2})")
+# Date dans le nom : supporte YYYY.MM.DD, YYYY-MM-DD, YYYYMMDD, MM.DD.YYYY, MM-DD-YYYY
+_DATE_PAT = re.compile(r"(?:\b(\d{4})[.\-](\d{2})[.\-](\d{2})\b|\b(\d{8})\b|\b(\d{2})[.\-](\d{2})[.\-](\d{4})\b)")
 
 def _parse_date_from_name(p: Path):
     m = _DATE_PAT.search(p.name)
     if not m:
         return None
-    s = m.group(1)
-    for fmt in ("%m.%d.%Y", "%d.%m.%Y", "%Y%m%d", "%Y-%m-%d"):
+    if m.group(1):  # YYYY.MM.DD or YYYY-MM-DD
+        yyyy, mm, dd = map(int, m.group(1,2,3))
+        fmt_dt = datetime(yyyy, mm, dd)
+        return fmt_dt
+    if m.group(4):  # YYYYMMDD
+        s = m.group(4)
         try:
-            return datetime.strptime(s, fmt)
+            return datetime.strptime(s, "%Y%m%d")
         except Exception:
-            continue
+            return None
+    if m.group(5):  # MM.DD.YYYY or MM-DD-YYYY
+        mm, dd, yyyy = map(int, m.group(5,6,7))
+        return datetime(yyyy, mm, dd)
     return None
 
-def _list_matches(dir_path: Path, patterns: list[str]) -> list[Path]:
+def _ext_ok(p: Path) -> bool:
+    # .xlsx / .xls / .xlsb (insensible à la casse), et pas de fichiers temporaires Office
+    return (not p.name.startswith("~$")) and p.suffix.lower() in {".xlsx", ".xls", ".xlsb"}
+
+def _glob_patterns(dir_path: Path, patterns: list[str]) -> list[Path]:
     out: list[Path] = []
     for pat in patterns:
         out.extend(dir_path.glob(pat))
-    return list({p.resolve() for p in out if p.is_file()})
+    # Sécurise : filtre extensions valides + fichiers existants
+    return [p for p in {p.resolve() for p in out} if p.is_file() and _ext_ok(p)]
 
-def pick_latest_runs_path(runs_dir: str) -> str:
+def _possible_mirror_dirs(raw: str) -> list[Path]:
+    """
+    Retourne des variantes POSIX d'un UNC pour les runtimes Linux/macOS.
+    Exemple: '\\\\gvaps1\\USR6\\CHGE\\...' ->
+      - //gvaps1/USR6/CHGE/...
+      - /mnt/gvaps1/USR6/CHGE/...   (classique Docker/WSL)
+    On renvoie aussi la version telle quelle.
+    """
+    paths: list[Path] = []
+    if not raw:
+        return paths
+    # 1) brut
+    paths.append(Path(raw))
+    # 2) slashes
+    slashy = raw.replace("\\", "/")
+    if not slashy.startswith("//"):
+        slashy2 = f"//{slashy.lstrip('/')}"
+    else:
+        slashy2 = slashy
+    paths.append(Path(slashy2))
+    # 3) tentative /mnt/server/share/...
+    parts = slashy2.lstrip("/").split("/")
+    if len(parts) >= 3:
+        server, share = parts[0], parts[1]
+        rest = "/".join(parts[2:])
+        paths.append(Path(f"/mnt/{server}/{share}/{rest}"))
+    return paths
+
+def _dirs_to_search(runs_dir: str) -> list[Path]:
+    # Toujours regarder le dossier local du repo
+    dirs = [LOCAL_LITASCO_DIR]
+    # Et ajouter le UNC + miroirs éventuels
+    if runs_dir:
+        dirs = _possible_mirror_dirs(runs_dir) + dirs
+    # Déduplique en gardant l'ordre
+    seen = set()
+    uniq = []
+    for d in dirs:
+        s = str(d)
+        if s not in seen:
+            uniq.append(d)
+            seen.add(s)
+    return uniq
+
+def pick_latest_runs_path(runs_dir: str, debug: bool = False) -> str:
     """
     Choisit automatiquement le dernier Excel :
-      - Sur Windows: cherche dans runs_dir (UNC) + LOCAL_LITASCO_DIR
-      - Sur non-Windows: ignore le UNC et cherche seulement dans LOCAL_LITASCO_DIR
-    Motifs testés: 'Europe Runs Recap*.xlsx' puis '*.xlsx'
-    Tri: date dans le nom > date de modification.
+      - Cherche dans : UNC (+ miroirs POSIX) + dossier local du repo
+      - Motifs : 'Europe Runs Recap*.xls*', '*Runs*Recap*.xls*', '*.xls*'
+      - Tri : date dans le nom > mtime
     """
-    patterns = ["Europe Runs Recap*.xlsx", "*.xlsx"]
+    patterns = ["Europe Runs Recap*.xls*", "*Runs*Recap*.xls*", "*.xls*"]
     candidates: list[Path] = []
-    searched_dirs: list[Path] = []
+    searched_dirs = _dirs_to_search(runs_dir)
 
-    # 1) UNC seulement si Windows
-    if runs_dir and platform.system() == "Windows":
-        dir_unc = Path(runs_dir)
-        searched_dirs.append(dir_unc)
+    for d in searched_dirs:
         try:
-            candidates += _list_matches(dir_unc, patterns)
+            if d.exists():
+                candidates += _glob_patterns(d, patterns)
         except Exception:
-            # ne bloque pas si le partage est inaccessible
-            pass
-
-    # 2) Fallback local du repo (toujours)
-    searched_dirs.append(LOCAL_LITASCO_DIR)
-    try:
-        candidates += _list_matches(LOCAL_LITASCO_DIR, patterns)
-    except Exception:
-        pass
-
-    if not candidates:
-        searched = "\n".join(f"- {p}" for p in searched_dirs)
-        hint = (
-            "Aucun Excel visible par le runtime.\n"
-            f"Dossiers cherchés:\n{searched}\n"
-            "→ Si tu es sur un runtime non-Windows (Docker/serveur), place l'Excel dans le dossier local du repo ci-dessus "
-            "ou monte le partage UNC."
-        )
-        raise FileNotFoundError(hint)
-
-    # Trier par date dans le nom (si dispo), sinon mtime
-    scored = []
-    for p in set(candidates):
-        try:
-            d = _parse_date_from_name(p)
-            if d is None:
-                d = datetime.fromtimestamp(p.stat().st_mtime)
-            scored.append((p, d))
-        except Exception:
+            # ne bloque pas sur erreurs d'accès réseau
             continue
 
-    if not scored:
-        raise FileNotFoundError("Fichiers trouvés mais illisibles/indisponibles.")
+    if debug:
+        st.write("**Dossiers inspectés :**")
+        st.code("\n".join(str(p) for p in searched_dirs) or "(aucun)")
 
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return str(scored[0][0])
+    if not candidates:
+        searched = "\n".join(f"• {p}" for p in searched_dirs)
+        raise FileNotFoundError(
+            "Aucun Excel visible par le runtime. Dossiers cherchés :\n" + searched +
+            "\n\n💡 Si l'app tourne dans Docker/serveur, monte le partage UNC OU copie l'Excel dans le dossier local du repo ci-dessus."
+        )
 
+    # Score = (date_nom si dispo, sinon mtime)
+    def score(p: Path):
+        dt = _parse_date_from_name(p)
+        if dt is None:
+            try:
+                dt = datetime.fromtimestamp(p.stat().st_mtime)
+            except Exception:
+                dt = datetime(1900, 1, 1)
+        return dt
 
+    candidates = sorted(set(candidates), key=score, reverse=True)
+    best = candidates[0]
+
+    if debug:
+        rows = []
+        for p in candidates[:25]:
+            try:
+                mtime = datetime.fromtimestamp(p.stat().st_mtime)
+            except Exception:
+                mtime = None
+            rows.append({
+                "name": p.name,
+                "folder": str(p.parent),
+                "date_in_name": (_parse_date_from_name(p).strftime("%Y-%m-%d")
+                                 if _parse_date_from_name(p) else ""),
+                "mtime": mtime.strftime("%Y-%m-%d %H:%M:%S") if mtime else "",
+            })
+        st.write("**Candidats triés (top 25)**")
+        st.dataframe(pd.DataFrame(rows))
+
+    return str(best)
+
+# ================== Lecture Excel ==================
 def load_runs(runs_path: str, sheet_name: str) -> pd.DataFrame:
+    # engine auto; permet .xlsx / .xls / .xlsb si lib installée
     df = pd.read_excel(runs_path, sheet_name=sheet_name)
     df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
-    df["Date"] = pd.to_datetime(df["Date"])
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", infer_datetime_format=True)
+    df = df.dropna(subset=["Date"])
     return df.set_index("Date")
 
 def series_for_country(runs_df: pd.DataFrame, country: str):
@@ -158,93 +223,58 @@ def nonempty_series(s: pd.Series | None) -> bool:
     vals = pd.to_numeric(s, errors="coerce")
     return not (vals.isna().all() or np.nan_to_num(vals.values).sum() == 0.0)
 
-# ================== Plotly ==================
+# ================== Plotly (inchangé) ==================
 def seasonality_figure(series: pd.Series, title: str) -> go.Figure | None:
     s = series.dropna()
     if s.empty or (s == 0).all():
         return None
-
     df = pd.DataFrame({"kt": s})
     df["Year"] = df.index.year
     df["Month"] = df.index.month
     ym = (df.groupby(["Year","Month"])["kt"].mean()
             .unstack(level=0).reindex(index=MONTH_TICKS))
-
     years = [int(y) for y in ym.columns if pd.notna(y)]
     if not years:
         return None
-
     band_years = [y for y in range(BAND_START, BAND_END + 1) if y in years]
     band_min = band_max = None
     if band_years:
         band_data = ym[band_years]
         band_min = band_data.min(axis=1)
         band_max = band_data.max(axis=1)
-
     fig = go.Figure()
-
-    # Bande min/max
     if band_years and band_min.notna().any() and band_max.notna().any():
-        fig.add_trace(go.Scatter(
-            x=MONTH_TICKS, y=band_min.values, mode="lines",
-            line=dict(width=0), showlegend=False, hoverinfo="skip"
-        ))
-        fig.add_trace(go.Scatter(
-            x=MONTH_TICKS, y=band_max.values, mode="lines",
-            line=dict(width=0), fill="tonexty", fillcolor="rgba(128,128,128,0.20)",
-            name=f"{BAND_START}–{BAND_END} range", hoverinfo="skip"
-        ))
-
-    # Courbes par année
+        fig.add_trace(go.Scatter(x=MONTH_TICKS, y=band_min.values, mode="lines",
+                                 line=dict(width=0), showlegend=False, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=MONTH_TICKS, y=band_max.values, mode="lines",
+                                 line=dict(width=0), fill="tonexty", fillcolor="rgba(128,128,128,0.20)",
+                                 name=f"{BAND_START}–{BAND_END} range", hoverinfo="skip"))
     for y in sorted(years):
         line = ym[y]
-        fig.add_trace(go.Scatter(
-            x=MONTH_TICKS, y=line.values, mode="lines+markers",
-            name=str(y),
-            line=dict(width=2 if y in SPECIAL_COLORS else 1.3,
-                      color=SPECIAL_COLORS.get(y, None)),
-            opacity=1.0 if y in SPECIAL_COLORS else 0.65,
-            marker=dict(size=4)
-        ))
-
-    # Légende SOUS le graphe + marges adaptées
-    fig.update_layout(
-        title=title,
-        xaxis=dict(tickmode="array", tickvals=MONTH_TICKS, ticktext=MONTH_LABELS),
-        yaxis_title="kt",
-        legend=dict(
-            orientation="h",
-            yanchor="top", y=-0.22,   # sous la figure
-            xanchor="left", x=0.0,
-            font=dict(size=10)
-        ),
-        margin=dict(l=10, r=10, t=40, b=90),  # + de marge en bas pour la légende
-        height=420
-    )
+        fig.add_trace(go.Scatter(x=MONTH_TICKS, y=line.values, mode="lines+markers", name=str(y),
+                                 line=dict(width=2 if y in SPECIAL_COLORS else 1.3,
+                                           color=SPECIAL_COLORS.get(y, None)),
+                                 opacity=1.0 if y in SPECIAL_COLORS else 0.65,
+                                 marker=dict(size=4)))
+    fig.update_layout(title=title,
+                      xaxis=dict(tickmode="array", tickvals=MONTH_TICKS, ticktext=MONTH_LABELS),
+                      yaxis_title="kt",
+                      legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="left", x=0.0, font=dict(size=10)),
+                      margin=dict(l=10, r=10, t=40, b=90),
+                      height=420)
     return fig
 
 def render_fig_grid(figs: list[go.Figure | None], max_cols: int = 3, key_prefix: str = "fig"):
-    """Affiche les figures en 1..max_cols colonnes, centrées si < max_cols,
-    en donnant une clé unique à chaque chart pour éviter StreamlitDuplicateElementId.
-    """
     valid = [f for f in figs if f is not None]
     if not valid:
         return
     n = len(valid)
-
-    # 1 figure : centrée
     if n == 1:
         cols = st.columns([1, 2, 1])
         with cols[1]:
-            st.plotly_chart(
-                valid[0],
-                use_container_width=True,
-                config={"displayModeBar": False},
-                key=f"{key_prefix}-0",
-            )
+            st.plotly_chart(valid[0], use_container_width=True, config={"displayModeBar": False},
+                            key=f"{key_prefix}-0")
         return
-
-    # 2 figures : 2 colonnes, sinon jusqu'à 3 colonnes
     cols_count = 2 if n == 2 else min(max_cols, 3)
     rows = (n + cols_count - 1) // cols_count
     idx = 0
@@ -254,15 +284,9 @@ def render_fig_grid(figs: list[go.Figure | None], max_cols: int = 3, key_prefix:
             if idx >= n:
                 break
             with cols[c]:
-                st.plotly_chart(
-                    valid[idx],
-                    use_container_width=True,
-                    config={"displayModeBar": False},
-                    key=f"{key_prefix}-{idx}",
-                )
+                st.plotly_chart(valid[idx], use_container_width=True, config={"displayModeBar": False},
+                                key=f"{key_prefix}-{idx}")
             idx += 1
-
-
 
 # ================== TAB ==================
 def run_litasco_supply_tab():
@@ -278,9 +302,12 @@ def run_litasco_supply_tab():
                              value=DEFAULT_LITASCO_RUNS_DIR)
 
     if platform.system() != "Windows" and (runs_dir.startswith("\\") or runs_dir.startswith("//")):
-        st.warning("Chemin UNC détecté sur un runtime non-Windows. Le code basculera sur le dossier local du repo si le partage n’est pas monté.")
+        st.warning("Chemin UNC détecté sur un runtime non-Windows. Le code essaiera des miroirs POSIX "
+                   "(//server/share…, /mnt/server/share/…). À défaut, il utilisera le dossier local du repo.")
 
     st.caption(f"Dossier local du repo : {LOCAL_LITASCO_DIR}")
+
+    debug = st.toggle("Afficher debug fichiers (dossiers & candidats)")
 
     st.markdown("---")
     if not st.button("Générer les graphiques"):
@@ -289,7 +316,7 @@ def run_litasco_supply_tab():
 
     # 1) Fichier: prend automatiquement le plus récent
     try:
-        runs_path = pick_latest_runs_path(runs_dir)
+        runs_path = pick_latest_runs_path(runs_dir, debug=debug)
         st.success(f"Fichier sélectionné automatiquement : **{os.path.basename(runs_path)}**")
         st.caption(runs_path)
     except Exception as e:
@@ -377,7 +404,6 @@ def run_litasco_supply_tab():
                     figs_ref.append(seasonality_figure(s, f"{country} / {ref['Refinery']} / {product}"))
                 render_fig_grid(figs_ref, max_cols=3, key_prefix=f"ref-{country}-{ref['Refinery']}")
 
-
         st.subheader("Country totals")
         figs_ctry = []
         for product, s in country_product[country].items():
@@ -386,10 +412,9 @@ def run_litasco_supply_tab():
             figs_ctry.append(seasonality_figure(s, f"{country} / {product}"))
         render_fig_grid(figs_ctry, max_cols=3, key_prefix=f"ctry-{country}")
 
-
         st.markdown("---")
 
-    # --- Totaux régionaux (une seule fois, hors de la boucle pays)
+    # --- Totaux régionaux
     st.header(f"{region} — Totaux régionaux")
     figs_reg = []
     for product, s in sorted(totals_product.items(), key=lambda kv: kv[0].lower()):
@@ -397,7 +422,6 @@ def run_litasco_supply_tab():
             continue
         figs_reg.append(seasonality_figure(s, f"{region} Total / {product}"))
     render_fig_grid(figs_reg, max_cols=3, key_prefix=f"region-{region}")
-
 
     # 5) Résumé
     today = datetime.now().strftime("%Y-%m-%d")
