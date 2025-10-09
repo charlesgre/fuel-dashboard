@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, platform, re, io
+import os, re, platform
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
@@ -11,8 +11,8 @@ import streamlit as st
 
 # ---------- Dossiers ----------
 DEFAULT_LITASCO_RUNS_DIR = r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\Litasco balances\Litasco supply"
-REPO_ROOT = Path(__file__).resolve().parents[1]
-LOCAL_LITASCO_DIR = REPO_ROOT / "Litasco balances" / "Litasco supply"
+# >>> même base que litasco_runs.py : dossier local = voisin du fichier courant
+LOCAL_LITASCO_DIR = Path(__file__).resolve().parent / "Litasco balances" / "Litasco supply"
 LOCAL_LITASCO_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Paramétrage raffineries ----------
@@ -116,36 +116,6 @@ def _list_candidates(dir_path: Path, patterns: List[str]) -> List[Path]:
             uniq.append(pr)
     return uniq
 
-def _mirror_paths(unc: str) -> List[Path]:
-    """Retourne UNC tel quel + //server/share/... + /mnt/server/share/..."""
-    if not unc: return []
-    out: List[Path] = [Path(unc)]
-    s = unc.replace("\\", "/")
-    if not s.startswith("//"):
-        s2 = f"//{s.lstrip('/')}"
-    else:
-        s2 = s
-    out.append(Path(s2))
-    parts = s2.lstrip("/").split("/")
-    if len(parts) >= 3:
-        server, share = parts[0], parts[1]
-        rest = "/".join(parts[2:])
-        out.append(Path(f"/mnt/{server}/{share}/{rest}"))
-    return out
-
-def _search_dirs(runs_dir: str) -> List[Path]:
-    dirs: List[Path] = []
-    if runs_dir:
-        dirs.extend(_mirror_paths(runs_dir))
-    dirs.append(LOCAL_LITASCO_DIR)
-    # déduplique en gardant l'ordre
-    seen = set(); uniq: List[Path] = []
-    for d in dirs:
-        sd = str(d)
-        if sd not in seen:
-            uniq.append(d); seen.add(sd)
-    return uniq
-
 def _sort_key(p: Path) -> Tuple[datetime, float]:
     dt = _date_from_name(p) or datetime(1900, 1, 1)
     try:
@@ -155,18 +125,26 @@ def _sort_key(p: Path) -> Tuple[datetime, float]:
     return (dt, mt)
 
 def pick_latest_runs_path(runs_dir: str, debug: bool = False) -> str:
-    """Agrège UNC (+ miroirs POSIX) + dossier local du repo et choisit le fichier le plus récent."""
+    """
+    EXACTEMENT comme pour litasco_runs.py :
+      - cherche dans [UNC saisi (tel quel), dossier local de repo]
+      - prend le plus récent: date dans le nom -> mtime
+    """
+    search_dirs = []
+    if runs_dir:
+        search_dirs.append(Path(runs_dir))
+    search_dirs.append(LOCAL_LITASCO_DIR)
+
     candidates: List[Path] = []
-    searched = _search_dirs(runs_dir)
-    for d in searched:
+    for d in search_dirs:
         candidates.extend(_list_candidates(d, FILENAME_GLOBS))
 
     if debug:
         st.write("**Dossiers inspectés :**")
-        st.code("\n".join(str(d) for d in searched) or "(aucun)")
+        st.code("\n".join(str(d) for d in search_dirs) or "(aucun)")
 
     if not candidates:
-        raise FileNotFoundError("Aucun Excel trouvé dans :\n" + "\n".join(f"• {d}" for d in searched))
+        raise FileNotFoundError("Aucun Excel trouvé dans :\n" + "\n".join(f"• {d}" for d in search_dirs))
 
     candidates.sort(key=_sort_key, reverse=True)
     best = candidates[0]
@@ -274,12 +252,14 @@ def render_fig_grid(figs: List[go.Figure | None], max_cols: int = 3, key_prefix:
     if not valid:
         return
     n = len(valid)
+
     if n == 1:
         cols = st.columns([1, 2, 1])
         with cols[1]:
             st.plotly_chart(valid[0], use_container_width=True, config={"displayModeBar": False},
                             key=f"{key_prefix}-0")
         return
+
     cols_count = 2 if n == 2 else min(max_cols, 3)
     rows = (n + cols_count - 1) // cols_count
     idx = 0
@@ -303,37 +283,28 @@ def run_litasco_supply_tab():
     with c2:
         runs_sheet = st.text_input("Onglet Excel (sheet)", value=("NWE" if region == "NWE" else "MED"))
 
-    runs_dir = st.text_input("Dossier des Runs (UNC ou vide pour utiliser le dossier local du repo)",
-                             value=DEFAULT_LITASCO_RUNS_DIR)
+    runs_dir = st.text_input(
+        "Dossier des Runs (UNC ou vide pour utiliser le dossier local du repo)",
+        value=DEFAULT_LITASCO_RUNS_DIR
+    )
     st.caption(f"Dossier local du repo : {LOCAL_LITASCO_DIR}")
 
     debug = st.toggle("Afficher debug fichiers (dossiers & candidats)")
-
-    # Fallback upload si le partage n'est pas monté
-    uploaded = st.file_uploader("Ou dépose ici un Excel (xlsx/xls/xlsb) en fallback", type=["xlsx", "xls", "xlsb"])
 
     st.markdown("---")
     if not st.button("Générer les graphiques"):
         st.info("Clique sur **Générer les graphiques**.")
         return
 
-    # 1) Fichier : auto; sinon utiliser l'upload
+    # 1) Fichier : dernier disponible (UNC + local)
     try:
         runs_path = pick_latest_runs_path(runs_dir, debug=debug)
         st.success(f"Fichier sélectionné automatiquement : **{os.path.basename(runs_path)}**")
         st.caption(runs_path)
     except Exception as e:
-        if uploaded is None:
-            st.error(f"Impossible de trouver un Excel automatiquement : {e}\n"
-                     f"➡️ Dépose un fichier via l'uploader ci-dessus ou copie un Excel dans **{LOCAL_LITASCO_DIR}**.")
-            return
-        # Sauvegarde du fichier uploadé dans le dossier local pour réutilisation
-        save_to = LOCAL_LITASCO_DIR / uploaded.name
-        with open(save_to, "wb") as f:
-            f.write(uploaded.getbuffer())
-        runs_path = str(save_to)
-        st.success(f"Fichier téléchargé utilisé : **{uploaded.name}**")
-        st.caption(runs_path)
+        st.error(f"Impossible de trouver un Excel automatiquement : {e}\n"
+                 f"➡️ Copie un Excel dans **{LOCAL_LITASCO_DIR}** ou rends le partage UNC accessible.")
+        return
 
     # 2) Lecture
     try:
