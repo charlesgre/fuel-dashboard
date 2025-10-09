@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import platform
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -15,7 +17,6 @@ import streamlit as st
 # =========================
 RUNS_DIR = r"\\gvaps1\USR6\CHGE\desktop\Fuel dashboard\Litasco balances\Litasco supply"
 REPO_RUNS_DIR = Path(__file__).resolve().parent / "Litasco balances" / "Litasco supply"
-FALLBACK_FILE = Path("/mnt/data/Europe Runs Recap 09.16.2025.xlsx")
 FILENAME_PREFIX = "Europe Runs Recap"
 FILENAME_GLOB = f"{FILENAME_PREFIX} *.xls*"
 
@@ -39,44 +40,74 @@ MUTED_PALETTE = ["#9ecae1", "#c7e9c0", "#fdd0a2", "#bcbddc", "#fdae6b", "#bdbdbd
 def _is_windows() -> bool:
     return platform.system() == "Windows"
 
-def _latest_in(folder: Path) -> Path | None:
-    try:
-        if folder.exists():
-            files = sorted(folder.glob(FILENAME_GLOB), key=lambda p: p.stat().st_mtime, reverse=True)
-            if files:
-                return files[0]
-    except Exception:
+# Ex: "Europe Runs Recap 09.16.2025.xlsx" -> MM.DD.YYYY
+_DATE_RE = re.compile(rf"{re.escape(FILENAME_PREFIX)}\s+(\d{{2}})\.(\d{{2}})\.(\d{{4}})", re.IGNORECASE)
+
+def _date_from_filename(p: Path) -> datetime | None:
+    """Extrait la date MM.DD.YYYY du nom de fichier si présente."""
+    m = _DATE_RE.search(p.name)
+    if not m:
         return None
-    return None
+    mm, dd, yyyy = map(int, m.groups())
+    try:
+        return datetime(yyyy, mm, dd)
+    except ValueError:
+        return None
+
+def _latest_in(folder: Path) -> Path | None:
+    """Renvoie le fichier le plus récent en combinant date du nom & mtime. Ignore les ~$…"""
+    if not folder.exists():
+        return None
+    candidates = [p for p in folder.glob(FILENAME_GLOB) if not p.name.startswith("~$")]
+    if not candidates:
+        return None
+
+    def sort_key(p: Path):
+        dt_name = _date_from_filename(p) or datetime(1900, 1, 1)
+        try:
+            mtime = p.stat().st_mtime
+        except Exception:
+            mtime = 0.0
+        return (dt_name, mtime)
+
+    return max(candidates, key=sort_key)
 
 def pick_latest_runs_file() -> Path:
-    """Ordre de recherche: UNC -> repo local -> fallback /mnt/data."""
+    """Ordre de recherche: UNC -> repo local. Pas de fallback."""
     p = _latest_in(Path(RUNS_DIR))
     if p:
         return p
     p = _latest_in(REPO_RUNS_DIR)
     if p:
         return p
-    if FALLBACK_FILE.exists():
-        return FALLBACK_FILE
     raise FileNotFoundError(
-        f"Aucun fichier {FILENAME_GLOB} trouvé dans:\n- UNC: {RUNS_DIR}\n- Repo: {REPO_RUNS_DIR}\n"
-        f"et fallback absent: {FALLBACK_FILE}"
+        f"Aucun fichier {FILENAME_GLOB} trouvé dans:\n- UNC: {RUNS_DIR}\n- Repo: {REPO_RUNS_DIR}"
     )
 
 # =========================
 # Chargement & préparation
 # =========================
-@st.cache_data(show_spinner=False, ttl=3600)
+# Le cache se casse automatiquement si le contenu (mtime) change.
+@st.cache_data(show_spinner=False, ttl=3600, hash_funcs={Path: lambda p: (p.as_posix(), p.stat().st_mtime)})
 def load_runs_workbook(xlsx_path: Path) -> Dict[str, pd.DataFrame]:
     """Lit le classeur et renvoie {sheet_name: DataFrame} nettoyés."""
     suffix = xlsx_path.suffix.lower()
-    engine = "openpyxl" if suffix == ".xlsx" else ("xlrd" if suffix == ".xls" else None)
+    if suffix == ".xlsx":
+        engine = "openpyxl"
+    elif suffix == ".xls":
+        engine = "xlrd"
+    elif suffix == ".xlsb":
+        engine = "pyxlsb"
+    else:
+        engine = None
+
     try:
         wb = pd.read_excel(xlsx_path, sheet_name=None, engine=engine)
     except Exception as e:
         if suffix == ".xls":
             raise RuntimeError("Lecture .xls impossible (installe xlrd compatible .xls ou convertis en .xlsx).") from e
+        if suffix == ".xlsb":
+            raise RuntimeError("Lecture .xlsb impossible (installe pyxlsb: pip install pyxlsb).") from e
         raise
     return {sh: df.dropna(axis=0, how="all").dropna(axis=1, how="all") for sh, df in wb.items()}
 
@@ -133,35 +164,26 @@ def _style_for_year(year: int, idx_other: int) -> dict:
     """Couleur/épaisseur/opacité selon l'année."""
     if year in HIGHLIGHT_COLORS:
         return {"color": HIGHLIGHT_COLORS[year], "width": 3.0, "opacity": 1.0, "marker": 6}
-    # ≤ 2023 : un peu plus épais que les autres muted, mais estompés
     color = MUTED_PALETTE[idx_other % len(MUTED_PALETTE)]
     width = 1.8 if year <= 2023 else 1.5
     return {"color": color, "width": width, "opacity": 0.55, "marker": 4}
 
 def _add_range_band(fig: go.Figure, d: pd.DataFrame, base_years: List[int]) -> None:
-    """
-    Ajoute un ruban min–max (range) calculé sur base_years, par mois.
-    Tracé: une courbe 'min' (invisible) + une courbe 'max' avec fill='tonexty'.
-    """
     d_base = d[d["Year"].isin(base_years)]
     if d_base.empty:
         return
-
-    # Tableau 12 mois pour min/max (avec reindex 1..12)
     pivot = d_base.pivot_table(index="Month", columns="Year", values="Value", aggfunc="mean")
     months = list(range(1, 13))
     min_vals = pivot.reindex(months).min(axis=1).values
     max_vals = pivot.reindex(months).max(axis=1).values
 
-    band_color = "rgba(31,119,180,0.14)"   # bleu doux transparent
+    band_color = "rgba(31,119,180,0.14)"
     edge_color = "rgba(31,119,180,0.40)"
 
-    # bas (pas dans la légende)
     fig.add_trace(go.Scatter(
         x=months, y=min_vals, mode="lines", line=dict(color=edge_color, width=0.5),
         hoverinfo="skip", showlegend=False, name="min 2020–2024"
     ))
-    # haut (affiche la légende + remplissage)
     fig.add_trace(go.Scatter(
         x=months, y=max_vals, mode="lines", line=dict(color=edge_color, width=0.5),
         fill="tonexty", fillcolor=band_color,
@@ -176,10 +198,8 @@ def plot_country_seasonal(long_df: pd.DataFrame, country: str, unit: str | None 
         fig.update_layout(title=f"{country} — (aucune donnée)", template="plotly_white", height=300)
         return fig
 
-    # Ruban de range 2020–2024 (dessiné d'abord pour rester en arrière-plan)
     _add_range_band(fig, d, BASE_RANGE_YEARS)
 
-    # Lignes par année (dans l'ordre croissant)
     years = sorted(d["Year"].unique().tolist())
     other_idx = 0
     for y in years:
