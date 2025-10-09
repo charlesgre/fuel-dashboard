@@ -13,17 +13,18 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 
-# === FICHIER SOURCE FIXE (comme dans les autres onglets) ===
-# -> Place TON fichier ici :  <repo>/Long short VGO/Long-short VGO master.xlsx
+# === FIXED SOURCE FILE (as other tabs) ===
+# -> Put YOUR file here:  <repo>/Long short VGO/Long-short VGO master.xlsx
 REPO_DIR = Path(__file__).resolve().parent
 DEFAULT_DIR = REPO_DIR / "Long short VGO"
-DEFAULT_FILE = "Long-short VGO master.xlsx"  # respecte la casse et le tiret
+DEFAULT_FILE = "Long-short VGO master.xlsx"  # respect case and hyphen
 XLSX_PATH = DEFAULT_DIR / DEFAULT_FILE
 SHEET_NAME = "Query1"
 
-# --- listes sweet / sour (fournies) ---
+# --- sweet / sour lists (provided) ---
 SWEET_REFINERIES = {
-    "Antwerp", "Fredericia", "Kalundborg", "Porvoo", "Donges", "Gonfreville",
+    "Antwerp", "Total Antwerp", "Exxon Antwerp",  # added to match renamed plants
+    "Fredericia", "Kalundborg", "Porvoo", "Donges", "Gonfreville",
     "Hamburg (Heide)", "Whitegate", "BP Rotterdam", "Exxon Rotterdam", "Mongstad",
     "Sines", "Preemraff Lysekil", "Preemraff Gothenburg", "St1 Gothenburg A B",
     "Stanlow", "Pembroke", "Humber", "Fawley",
@@ -43,12 +44,15 @@ NWE_REGION_SUBSTRING = "Northwest Europe"
 
 
 # ------------- helpers -------------
-def _make_alias_map(rotterdam_target: str) -> Dict[str, str]:
-    assert rotterdam_target in {"BP Rotterdam", "Exxon Rotterdam"}
+def _make_alias_map() -> Dict[str, str]:
+    """
+    Normalize a couple of verbose plant names.
+    Rotterdam mapping is intentionally NOT done here anymore,
+    because names are already rewritten at Excel load (response #2).
+    """
     return {
         "Notre-Dame-de-Gravenchon Refinery": "Port-Jerome Gravenchon",
         "St1 Gothenburg Refinery": "St1 Gothenburg A B",
-        "Rotterdam Refinery": rotterdam_target,   # mapping choisi dans la sidebar
     }
 
 def _map_crude(plant: str, alias_map: Dict[str, str]) -> Optional[str]:
@@ -86,17 +90,17 @@ def _vgo_yield(crude: Optional[str]) -> float:
     return np.nan
 
 
-# ------------- path picking (robuste) -------------
+# ------------- path picking (robust) -------------
 def _pick_xlsx_path(default_excel_path: Optional[str]) -> Path:
     """
-    Ordre de résolution :
-      1) paramètre default_excel_path (si fourni et existe)
-      2) variable d'env/secret VGO_XLSX_PATH (si existe)
-      3) chemin fixe (Long short VGO/Long-short VGO master.xlsx)
-      4) recherche tolérante dans le repo
-    Retourne le chemin (existant ou attendu pour message).
+    Resolution order:
+      1) parameter default_excel_path (if provided and exists)
+      2) env/secret VGO_XLSX_PATH (if exists)
+      3) fixed path (Long short VGO/Long-short VGO master.xlsx)
+      4) tolerant search in the repo
+    Returns an existing (or expected) path.
     """
-    # 1) paramètre
+    # 1) parameter
     if default_excel_path:
         p = Path(default_excel_path)
         if p.exists():
@@ -109,11 +113,11 @@ def _pick_xlsx_path(default_excel_path: Optional[str]) -> Path:
         if p.exists():
             return p
 
-    # 3) chemin fixe
+    # 3) fixed path
     if XLSX_PATH.exists():
         return XLSX_PATH
 
-    # 4) recherche tolérante
+    # 4) tolerant search
     candidates = list(REPO_DIR.rglob(DEFAULT_FILE))
     if candidates:
         return candidates[0]
@@ -121,7 +125,7 @@ def _pick_xlsx_path(default_excel_path: Optional[str]) -> Path:
     if partial:
         return partial[0]
 
-    # sinon, renvoie le chemin attendu
+    # else, return the expected path
     return XLSX_PATH
 
 
@@ -131,16 +135,30 @@ def _load_query1(excel_path: str) -> pd.DataFrame:
     df = pd.read_excel(excel_path, sheet_name=SHEET_NAME)
     for c in ("EVENTSTARTDATE", "EVENTENDDATE"):
         df[c] = pd.to_datetime(df[c], errors="coerce")
+
+    # === Explicit refinery renaming (Response #2) ===
+    # Antwerpen Refinery -> Total Antwerp
+    # Antwerp Refinery   -> Exxon Antwerp
+    # Rotterdam Refinery -> Exxon Rotterdam
+    # BP Rotterdam Refinery -> BP Rotterdam
+    rename_map = {
+        "Antwerpen Refinery": "Total Antwerp",
+        "Antwerp Refinery": "Exxon Antwerp",
+        "Rotterdam Refinery": "Exxon Rotterdam",
+        "BP Rotterdam Refinery": "BP Rotterdam",
+    }
+    if "PLANTNAME" in df.columns:
+        df["PLANTNAME"] = df["PLANTNAME"].replace(rename_map)
+
     return df
 
 @st.cache_data(show_spinner=False)
 def _compute_month_view(
     excel_path: str,
-    rotterdam_target: str,
     year: int,
     month: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    alias_map = _make_alias_map(rotterdam_target)
+    alias_map = _make_alias_map()
     df = _load_query1(excel_path)
 
     df["PLANT_ALIAS"] = df["PLANTNAME"].replace(alias_map)
@@ -156,7 +174,7 @@ def _compute_month_view(
     )
     agg["EFF_CAP"] = agg["CAPACITY"] * agg["ONLINE_FRAC"]
 
-    # TARS chevauchant le mois
+    # TARs overlapping the month
     tar_rows: List[Dict] = []
     for (reg, cnt, ref, crude), sub in df_rel.groupby(["REGION","COUNTRY","PLANT_ALIAS","CRUDE_TYPE"]):
         for _, r in sub.iterrows():
@@ -181,17 +199,18 @@ def _compute_month_view(
         if col not in piv.columns:
             piv[col] = 0.0
 
+    # Rename columns with units (bpd)
     piv = piv.rename(columns={
-        "Vacuum Distillation": "Vacuum Cap (Avail)",
-        "FCCU (Fluid Catalytic Cracker)": "FCCU Cap (Avail)",
-        "Distillate Hydrocracker": "DHC Cap (Avail)",
+        "Vacuum Distillation": "Vacuum Cap (Avail, bpd)",
+        "FCCU (Fluid Catalytic Cracker)": "FCCU Cap (Avail, bpd)",
+        "Distillate Hydrocracker": "DHC Cap (Avail, bpd)",
     })
-    piv["VGO_Out"] = piv.apply(lambda r: r["Vacuum Cap (Avail)"] * _vgo_yield(r["CRUDE_TYPE"]), axis=1)
-    piv["VGO_Demand"] = piv["FCCU Cap (Avail)"] + piv["DHC Cap (Avail)"]
-    piv["Balance"] = piv["VGO_Out"] - piv["VGO_Demand"]
+    piv["VGO_Out (bpd)"] = piv.apply(lambda r: r["Vacuum Cap (Avail, bpd)"] * _vgo_yield(r["CRUDE_TYPE"]), axis=1)
+    piv["VGO_Demand (bpd)"] = piv["FCCU Cap (Avail, bpd)"] + piv["DHC Cap (Avail, bpd)"]
+    piv["Balance (bpd)"] = piv["VGO_Out (bpd)"] - piv["VGO_Demand (bpd)"]
     piv["Status"] = np.where(
-        (piv["FCCU Cap (Avail)"] == 0) & (piv["DHC Cap (Avail)"] == 0), "Long",
-        np.where(piv["Balance"] >= 0, "Long", "Short"),
+        (piv["FCCU Cap (Avail, bpd)"] == 0) & (piv["DHC Cap (Avail, bpd)"] == 0), "Long",
+        np.where(piv["Balance (bpd)"] >= 0, "Long", "Short"),
     )
 
     piv = piv.rename(columns={"PLANT_ALIAS": "Refinery", "CRUDE_TYPE": "Crude"})
@@ -210,53 +229,47 @@ def _compute_month_view(
 # ------------- UI -------------
 def render_long_short_vgo_tab(default_excel_path: Optional[str] = None) -> None:
     """
-    Paramètre gardé pour compatibilité avec app.py : si fourni, il sert d'override.
+    Parameter kept for compatibility with app.py: if provided, it overrides defaults.
     """
-    st.subheader("VGO Long / Short — NWE (TARS-aware)")
+    st.subheader("VGO Long / Short — NWE (TARS-aware) — All capacities in bpd")
 
     xlsx = _pick_xlsx_path(default_excel_path)
-    st.caption(f"🔎 Excel utilisé/attendu : **{xlsx}**")
+    st.caption(f"🔎 Excel used/expected: **{xlsx}**")
 
     if not xlsx.exists():
         st.error(
-            "Fichier Excel introuvable pour ce runtime.\n\n"
-            f"Chemin attendu : **{XLSX_PATH}**\n\n"
-            "✅ Solutions :\n"
-            "• Place le fichier dans *Long short VGO/Long-short VGO master.xlsx* (même casse),\n"
-            "• ou fournis un chemin via l’argument `default_excel_path` dans app.py,\n"
-            "• ou définis la variable d’environnement **VGO_XLSX_PATH** pointant vers le fichier.\n"
-            "ℹ️ Les chemins UNC Windows (\\\\serveur\\... ) ne sont pas visibles depuis un runtime Linux/Cloud."
+            "Excel file not found for this runtime.\n\n"
+            f"Expected path: **{XLSX_PATH}**\n\n"
+            "✅ Options:\n"
+            "• Place the file at *Long short VGO/Long-short VGO master.xlsx* (same casing),\n"
+            "• Provide a path via the `default_excel_path` argument in app.py,\n"
+            "• Or set environment variable **VGO_XLSX_PATH** pointing to the file.\n"
+            "ℹ️ Windows UNC paths (\\\\server\\...) are not visible from Linux/Cloud runtimes."
         )
         return
 
-    # Choix mapping Rotterdam
-    rotterdam_target = st.sidebar.selectbox(
-        "Mapping pour 'Rotterdam Refinery'",
-        options=["BP Rotterdam", "Exxon Rotterdam"],
-        index=0,
-        help="Recalcule la vue mensuelle avec ce mapping d'alias.",
-    )
+    # ⚠️ Removed the sidebar Rotterdam selector entirely.
 
-    # Période
+    # Period
     c1, c2, _ = st.columns([1,1,2])
     with c1:
-        year = st.number_input("Année", min_value=2022, max_value=2035, value=2026, step=1)
+        year = st.number_input("Year", min_value=2022, max_value=2035, value=2026, step=1)
     with c2:
-        month = st.number_input("Mois", min_value=1, max_value=12, value=2, step=1)
+        month = st.number_input("Month", min_value=1, max_value=12, value=2, step=1)
 
-    # Calcul
+    # Compute
     try:
-        df_month, df_tars = _compute_month_view(str(xlsx), rotterdam_target, int(year), int(month))
+        df_month, df_tars = _compute_month_view(str(xlsx), int(year), int(month))
     except Exception as e:
-        st.error("Impossible de calculer la vue mensuelle.")
+        st.error("Failed to compute the monthly view.")
         with st.expander("Traceback"):
             st.exception(e)
         return
 
-    # Filtres
+    # Filters
     crude = st.selectbox("Crude", ["all", "sweet", "sour"], index=0)
     refs = sorted(df_month["Refinery"].unique().tolist())
-    selected_refs = st.multiselect("Refineries (multi)", options=refs, default=[])
+    selected_refs = st.multiselect("Refineries (multi-select)", options=refs, default=[])
 
     def _apply_filters(dfX: pd.DataFrame) -> pd.DataFrame:
         out = dfX.copy()
@@ -269,79 +282,79 @@ def render_long_short_vgo_tab(default_excel_path: Optional[str] = None) -> None:
     df_f = _apply_filters(df_month)
     df_tars_f = _apply_filters(df_tars) if not df_tars.empty else df_tars
 
-    # KPIs
-    vgo_out = float(df_f["VGO_Out"].sum())
-    vgo_dem = float(df_f["VGO_Demand"].sum())
-    long_total = float(df_f.loc[df_f["Status"] == "Long", "Balance"].sum())
-    short_total = float((df_f.loc[df_f["Status"] == "Short", "Balance"]).abs().sum())
-    n_long = int((df_f["Status"] == "Long").sum())
-    n_short = int((df_f["Status"] == "Short").sum())
+    # KPIs (all bpd)
+    vgo_out = float(df_f["VGO_Out (bpd)"].sum())
+    vgo_dem = float(df_f["VGO_Demand (bpd)"].sum())
+    long_total = float(df_f.loc[df_f["Status"] == "Long", "Balance (bpd)"].sum())
+    short_total = float((df_f.loc[df_f["Status"] == "Short", "Balance (bpd)"]).abs().sum())
+    n_long = int((df_f["Status"] == "Long").count())
+    n_short = int((df_f["Status"] == "Short").count())
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("VGO Out (mois)", f"{vgo_out:,.0f}")
-    k2.metric("VGO Demand (mois)", f"{vgo_dem:,.0f}")
-    k3.metric("Long total", f"{long_total:,.0f}")
-    k4.metric("Short total", f"{short_total:,.0f}")
+    k1.metric("VGO Out (monthly, bpd)", f"{vgo_out:,.0f}")
+    k2.metric("VGO Demand (monthly, bpd)", f"{vgo_dem:,.0f}")
+    k3.metric("Total Long (bpd)", f"{long_total:,.0f}")
+    k4.metric("Total Short (bpd)", f"{short_total:,.0f}")
     k5.metric("Sites Long / Short", f"{n_long} / {n_short}")
 
     st.markdown("---")
 
     if df_f.empty:
-        st.info("Aucune donnée pour ce filtre.")
+        st.info("No data for this filter.")
         return
 
     # Bar chart
     df_plot = df_f.copy()
     df_plot["RefLabel"] = df_plot["Refinery"] + " (" + df_plot["COUNTRY"] + ")"
-    df_plot["Need"] = np.where(df_plot["Status"] == "Short", -df_plot["Balance"], 0.0)
-    df_plot["Surplus"] = np.where(df_plot["Status"] == "Long", df_plot["Balance"], 0.0)
-    df_plot = df_plot.sort_values(["Status", "Need", "Surplus"], ascending=[True, False, False])
+    df_plot["Need (bpd)"] = np.where(df_plot["Status"] == "Short", -df_plot["Balance (bpd)"], 0.0)
+    df_plot["Surplus (bpd)"] = np.where(df_plot["Status"] == "Long", df_plot["Balance (bpd)"], 0.0)
+    df_plot = df_plot.sort_values(["Status", "Need (bpd)", "Surplus (bpd)"], ascending=[True, False, False])
 
     color_map = {"Long": "#2e7d32", "Short": "#c62828"}
     fig_bar = px.bar(
-        df_plot, x="RefLabel", y="Balance", color="Status", color_discrete_map=color_map,
+        df_plot, x="RefLabel", y="Balance (bpd)", color="Status", color_discrete_map=color_map,
         hover_data={
             "RefLabel": True, "COUNTRY": True, "Crude": True,
-            "Vacuum Cap (Avail)": ":,.0f", "FCCU Cap (Avail)": ":,.0f", "DHC Cap (Avail)": ":,.0f",
-            "VGO_Out": ":,.0f", "VGO_Demand": ":,.0f", "Balance": ":,.0f",
+            "Vacuum Cap (Avail, bpd)": ":,.0f", "FCCU Cap (Avail, bpd)": ":,.0f", "DHC Cap (Avail, bpd)": ":,.0f",
+            "VGO_Out (bpd)": ":,.0f", "VGO_Demand (bpd)": ":,.0f", "Balance (bpd)": ":,.0f",
         },
     )
     fig_bar.update_layout(
-        title=f"VGO Balance par raffinerie — {year}-{month:02d} (NWE)",
-        xaxis_title=None, yaxis_title="Balance (unités capacité)",
+        title=f"VGO Balance by Refinery — {year}-{month:02d} (NWE, bpd)",
+        xaxis_title=None, yaxis_title="Balance (bpd)",
         xaxis_tickangle=60, height=480, legend_title=None,
         margin=dict(l=10, r=10, t=60, b=10),
     )
     st.plotly_chart(fig_bar, use_container_width=True, key="vgo_bar")
 
-    # Waterfall
+    # Waterfall (bpd)
     wf = go.Figure(go.Waterfall(
         name="VGO NWE", orientation="v",
         measure=["relative","relative","relative","total"],
-        x=["VGO Out","– FCCU","– DHC","Balance"],
-        y=[vgo_out, -df_f["FCCU Cap (Avail)"].sum(), -df_f["DHC Cap (Avail)"].sum(), vgo_out - vgo_dem],
+        x=["VGO Out (bpd)","– FCCU (bpd)","– DHC (bpd)","Balance (bpd)"],
+        y=[vgo_out, -df_f["FCCU Cap (Avail, bpd)"].sum(), -df_f["DHC Cap (Avail, bpd)"].sum(), vgo_out - vgo_dem],
         connector={"line":{"color":"rgba(0,0,0,0.3)"}}
     ))
-    wf.update_layout(title=f"Waterfall — {year}-{month:02d} (NWE, après filtres)", height=420)
+    wf.update_layout(title=f"Waterfall — {year}-{month:02d} (NWE, after filters, bpd)", height=420)
     st.plotly_chart(wf, use_container_width=True, key="vgo_wf")
 
-    # Détail raffinerie
-    ref_for_detail = st.selectbox("Détail raffinerie", options=df_plot["Refinery"].tolist())
+    # Refinery detail (bpd)
+    ref_for_detail = st.selectbox("Refinery detail", options=df_plot["Refinery"].tolist())
     ref_row = df_month[(df_month["Refinery"] == ref_for_detail)].iloc[0]
     st.markdown(
         f"**{ref_row['Refinery']}** — {ref_row['COUNTRY']} — "
         f"Status: **{'🟢 Long' if ref_row['Status']=='Long' else '🔴 Short'}**  \n"
         f"Crude: **{ref_row['Crude']}** | "
-        f"VDU: **{ref_row['Vacuum Cap (Avail)']:,.0f}** | "
-        f"FCCU: **{ref_row['FCCU Cap (Avail)']:,.0f}** | "
-        f"DHC: **{ref_row['DHC Cap (Avail)']:,.0f}** | "
-        f"VGO_Out: **{ref_row['VGO_Out']:.0f}** | "
-        f"Demand: **{ref_row['VGO_Demand']:.0f}** | "
-        f"Balance: **{ref_row['Balance']:.0f}**"
+        f"VDU: **{ref_row['Vacuum Cap (Avail, bpd)']:,.0f} bpd** | "
+        f"FCCU: **{ref_row['FCCU Cap (Avail, bpd)']:,.0f} bpd** | "
+        f"DHC: **{ref_row['DHC Cap (Avail, bpd)']:,.0f} bpd** | "
+        f"VGO Out: **{ref_row['VGO_Out (bpd)']:.0f} bpd** | "
+        f"Demand: **{ref_row['VGO_Demand (bpd)']:.0f} bpd** | "
+        f"Balance: **{ref_row['Balance (bpd)']:.0f} bpd**"
     )
 
-    # TARs du mois
-    st.markdown("### TARs du mois (après filtres)")
+    # Monthly TARs (bpd)
+    st.markdown("### Monthly TARs (after filters) — capacities in bpd")
     if df_tars is not None and not df_tars.empty:
         df_tars_f = df_tars.copy()
         if crude != "all":
@@ -350,39 +363,43 @@ def render_long_short_vgo_tab(default_excel_path: Optional[str] = None) -> None:
             df_tars_f = df_tars_f[df_tars_f["Refinery"].isin(selected_refs)]
 
         if df_tars_f.empty:
-            st.info("Aucun TAR qui chevauche le mois sélectionné pour ce filtre.")
+            st.info("No TAR overlapping the selected month for this filter.")
         else:
             df_tars_f = df_tars_f.sort_values(["Start","Refinery","Unit","UnitName"]).copy()
             df_tars_disp = df_tars_f[[
                 "Refinery","Unit","UnitName","DeratePct","Start","End","DaysOverlap",
                 "EventType","Cause","Capacity","Crude","COUNTRY"
-            ]].rename(columns={"DeratePct":"Derate %","DaysOverlap":"Days"})
+            ]].rename(columns={
+                "DeratePct":"Derate %",
+                "DaysOverlap":"Days",
+                "Capacity":"Capacity (bpd)"
+            })
             st.dataframe(df_tars_disp, use_container_width=True, hide_index=True)
 
             st.download_button(
-                "⬇️ Export TARs (mois filtré)",
+                "⬇️ Export TARs (filtered month, bpd)",
                 data=df_tars_disp.to_csv(index=False).encode("utf-8"),
-                file_name=f"VGO_TARs_{year}_{month:02d}_filtered.csv",
+                file_name=f"VGO_TARs_{year}_{month:02d}_filtered_bpd.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
     else:
-        st.info("Pas de TAR détectées dans ce mois.")
+        st.info("No TAR detected in this month.")
 
     st.markdown("---")
 
-    # Table mois + export
-    st.markdown("### Table du mois (après filtres)")
+    # Monthly table + export (bpd)
+    st.markdown("### Monthly table (after filters) — all in bpd")
     df_month_disp = df_f[[
         "REGION","COUNTRY","Refinery","Crude",
-        "Vacuum Cap (Avail)","VGO_Out","FCCU Cap (Avail)","DHC Cap (Avail)",
-        "VGO_Demand","Balance","Status",
+        "Vacuum Cap (Avail, bpd)","VGO_Out (bpd)","FCCU Cap (Avail, bpd)","DHC Cap (Avail, bpd)",
+        "VGO_Demand (bpd)","Balance (bpd)","Status",
     ]].copy()
     st.dataframe(df_month_disp, use_container_width=True, hide_index=True)
     st.download_button(
-        "⬇️ Export table mois (après filtres)",
+        "⬇️ Export monthly table (after filters, bpd)",
         data=df_month_disp.to_csv(index=False).encode("utf-8"),
-        file_name=f"VGO_Month_{year}_{month:02d}_filtered.csv",
+        file_name=f"VGO_Month_{year}_{month:02d}_filtered_bpd.csv",
         mime="text/csv",
         use_container_width=True,
     )
