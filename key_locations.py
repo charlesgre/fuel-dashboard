@@ -1,7 +1,7 @@
 # app_key_locations.py
 # --------------------
 # Streamlit >= 1.25
-# pip install streamlit python-dotenv lxml pandas matplotlib
+# pip install streamlit python-dotenv lxml pandas matplotlib plotly
 
 import os
 import io
@@ -15,8 +15,7 @@ import unicodedata
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
-
-import plotly.graph_objects as go  # NEW
+import plotly.graph_objects as go
 
 
 def _canon(s: str) -> str:
@@ -80,7 +79,6 @@ COLOR_MAP = {
     "Unknown Asia": "#7f7f7f",  # utile pour l’onglet Iran
 }
 
-
 # --- (Optionnel) charger un .env ---
 try:
     from dotenv import load_dotenv
@@ -88,10 +86,8 @@ try:
 except Exception:
     pass
 
-
 # === Variables d'environnement à définir ===
 API_URL = "https://secure.petro-logistics.com/api/v3/movementsdata"
-
 
 # === Mapping des jeux de données par "location" ===
 QUERY_BY_LOCATION = {
@@ -101,7 +97,6 @@ QUERY_BY_LOCATION = {
     "Mexican exports": "Mexico_FO_2023_P5",
     "Venezuelan exports": "Venezuela_FO_2023_P5",
 }
-
 
 # === Pays par défaut (à ajuster si besoin) ===
 DEFAULT_COUNTRIES = {
@@ -139,7 +134,6 @@ DEFAULT_COUNTRIES = {
         "Floating storage", "Not known"
     ],
 }
-
 
 # Pour faire correspondre les libellés “UI” aux noms réels des colonnes PL
 COUNTRY_ALIASES = {
@@ -248,8 +242,8 @@ def compute_discharge_table(root: ET.Element, target_year: int, target_month: in
     prefix = f"{target_year}-{target_month:02}"
     rows = []
     for m in root.findall(".//movement"):
-        ldate = m.findtext("load_port_date")          # <--- CHANGE
-        if ldate and ldate.startswith(prefix):        # <--- CHANGE
+        ldate = m.findtext("load_port_date")          # <--- LOAD
+        if ldate and ldate.startswith(prefix):
             rows.append([
                 m.findtext("tanker_name"),
                 m.findtext("load_port_date"),
@@ -266,69 +260,115 @@ def compute_discharge_table(root: ET.Element, target_year: int, target_month: in
     return pd.DataFrame(rows, columns=cols)
 
 
-def compute_yoy(root: ET.Element, countries: list, target_year: int, target_month: int):
-    yoy_data = defaultdict(lambda: {"prev": 0.0, "curr": 0.0})
+# =========================
+#        MoM (NOUVEAU)
+# =========================
+def compute_mom(root: ET.Element, countries: list, target_year: int, target_month: int):
+    """
+    Compare month-over-month (MoM) les exports (LOAD month) par pays sélectionnés.
+    Retourne un DataFrame avec Prev (kt), Curr (kt) et MoM Change (%).
+    """
+    # Mois précédent (gestion du passage d’année)
+    if target_month == 1:
+        prev_year, prev_month = target_year - 1, 12
+    else:
+        prev_year, prev_month = target_year, target_month - 1
+
+    mom_data = defaultdict(lambda: {"prev": 0.0, "curr": 0.0})
 
     def label_for(api_country: str) -> str | None:
-        # renvoie le label demandé correspondant au nom API rencontré
+        # reconnaît les alias et casse/accents
+        c_api = _canon(api_country or "")
         for r in countries:
-            if api_country == r or api_country == COUNTRY_ALIASES.get(r):
+            if c_api == _canon(r) or c_api == _canon(COUNTRY_ALIASES.get(r, r)):
                 return r
         return None
 
     for m in root.findall(".//movement"):
         try:
-            api_c = m.findtext("discharge_country")
-            tonnes = float(m.findtext("qty_tonnes") or 0)
+            api_c = m.findtext("discharge_country") or ""
+            tonnes = float(m.findtext("qty_tonnes") or 0) / 1000.0  # kt
             d = datetime.strptime(m.findtext("load_port_date"), "%Y-%m-%d")
-            if d.month != target_month:
+            if (d.year, d.month) not in {(prev_year, prev_month), (target_year, target_month)}:
                 continue
+
             rlabel = label_for(api_c)
             if rlabel is None:
                 continue
-            if d.year == target_year - 1:
-                yoy_data[rlabel]["prev"] += tonnes / 1000.0
-            elif d.year == target_year:
-                yoy_data[rlabel]["curr"] += tonnes / 1000.0
+
+            if d.year == prev_year and d.month == prev_month:
+                mom_data[rlabel]["prev"] += tonnes
+            elif d.year == target_year and d.month == target_month:
+                mom_data[rlabel]["curr"] += tonnes
         except Exception:
             continue
 
     rows, tot_prev, tot_curr = [], 0.0, 0.0
     for r in countries:
-        p = yoy_data[r]["prev"]; c = yoy_data[r]["curr"]
-        tot_prev += p; tot_curr += c
+        p = round(mom_data[r]["prev"], 2)
+        c = round(mom_data[r]["curr"], 2)
+        tot_prev += p
+        tot_curr += c
         change = "N/A" if p == 0 else round(((c - p) / p) * 100, 1)
-        rows.append([r, round(p, 2), round(c, 2), change])
-    total_change = "N/A" if tot_prev == 0 else round(((tot_curr - tot_prev)/tot_prev)*100, 1)
+        rows.append([r, p, c, change])
+
+    total_change = "N/A" if tot_prev == 0 else round(((tot_curr - tot_prev) / tot_prev) * 100, 1)
+
+    prev_label = f"{prev_year}-{prev_month:02} (kt)"
+    curr_label = f"{target_year}-{target_month:02} (kt)"
     rows.append(["Total", round(tot_prev, 2), round(tot_curr, 2), total_change])
-    return pd.DataFrame(rows, columns=["Country", f"{target_year-1} (kt)", f"{target_year} (kt)", "YoY Change (%)"])
+
+    return pd.DataFrame(rows, columns=["Country", prev_label, curr_label, "MoM Change (%)"])
 
 
-def yoy_narrative(df_yoy: pd.DataFrame, target_year: int, target_month: int):
-    month_name = datetime(target_year, target_month, 1).strftime("%B %Y")
-    if df_yoy.empty or "YoY Change (%)" not in df_yoy.columns:
-        return f"No YoY data available for {month_name}."
-    total_row = df_yoy[df_yoy["Country"]=="Total"].iloc[0]
-    change = total_row["YoY Change (%)"]
+def mom_narrative(df_mom: pd.DataFrame, target_year: int, target_month: int):
+    # libellés de mois
+    curr_month_name = datetime(target_year, target_month, 1).strftime("%B %Y")
+    if target_month == 1:
+        prev_year, prev_month = target_year - 1, 12
+    else:
+        prev_year, prev_month = target_year, target_month - 1
+    prev_month_name = datetime(prev_year, prev_month, 1).strftime("%B %Y")
+
+    if df_mom.empty or "MoM Change (%)" not in df_mom.columns:
+        return f"No MoM data available for {curr_month_name} vs {prev_month_name}."
+
+    total_row = df_mom[df_mom["Country"] == "Total"].iloc[0]
+    change = total_row["MoM Change (%)"]
     if change == "N/A":
-        return f"Year-over-year comparison for {month_name} is not available due to missing baseline."
+        return (
+            f"Month-over-month comparison for {curr_month_name} vs "
+            f"{prev_month_name} is not available due to missing baseline."
+        )
+
     change_val = float(change)
     head = (f"Total exports to the selected countries "
-            f"{'increased' if change_val>0 else 'decreased' if change_val<0 else 'were unchanged'} "
-            f"by {abs(change_val):.1f}% vs {target_year-1}.")
-    df_det = df_yoy[(df_yoy["Country"]!="Total") & (df_yoy["YoY Change (%)"]!="N/A")]
+            f"{'increased' if change_val > 0 else 'decreased' if change_val < 0 else 'were unchanged'} "
+            f"by {abs(change_val):.1f}% vs {prev_month_name}.")
+
+    df_det = df_mom[(df_mom["Country"] != "Total") & (df_mom["MoM Change (%)"] != "N/A")]
     tail = ""
     if not df_det.empty:
-        srt = df_det.sort_values("YoY Change (%)", ascending=False)
+        # Trier en mappant "N/A" pour éviter les erreurs
+        srt = df_det.copy()
+        srt["_v"] = srt["MoM Change (%)"].map(lambda x: float(x) if x != "N/A" else -1e9)
+        srt = srt.sort_values("_v", ascending=False).drop(columns="_v")
         inc = srt.iloc[0]
         dec = srt.iloc[-1]
-        if isinstance(inc["YoY Change (%)"], (int,float)) and inc["YoY Change (%)"]>0:
-            tail += f" Largest increase: {inc['Country']} (+{inc['YoY Change (%)']:.1f}%)."
-        if isinstance(dec["YoY Change (%)"], (int,float)) and dec["YoY Change (%)"]<0:
-            tail += f" Largest decline: {dec['Country']} ({dec['YoY Change (%)']:.1f}%)."
+        try:
+            if float(inc["MoM Change (%)"]) > 0:
+                tail += f" Largest increase: {inc['Country']} (+{float(inc['MoM Change (%)']):.1f}%)."
+        except Exception:
+            pass
+        try:
+            if float(dec["MoM Change (%)"]) < 0:
+                tail += f" Largest decline: {dec['Country']} ({float(dec['MoM Change (%)']):.1f}%)."
+        except Exception:
+            pass
     return head + tail
 
-def style_yoy_table(df: pd.DataFrame):
+
+def style_mom_table(df: pd.DataFrame):
     def colorize(v):
         try:
             if v == "N/A":
@@ -337,11 +377,15 @@ def style_yoy_table(df: pd.DataFrame):
             return "color: green;" if v > 0 else ("color: red;" if v < 0 else "")
         except Exception:
             return ""
-    # formatage des colonnes numériques
+    # formatage des colonnes numériques (les 2 colonnes kt au milieu)
     fmt = {df.columns[1]: "{:.2f}", df.columns[2]: "{:.2f}"}
     styler = df.style.format(fmt)
-    return styler.applymap(colorize, subset=["YoY Change (%)"])
+    return styler.applymap(colorize, subset=["MoM Change (%)"])
 
+
+# =========================
+#     Figures & exports
+# =========================
 def fig_monthly_matplotlib(df: pd.DataFrame, countries: list, title: str):
     fig = plt.figure(figsize=(12, 6))
     ax = plt.gca()
@@ -377,8 +421,6 @@ def fig_monthly_matplotlib(df: pd.DataFrame, countries: list, title: str):
     ax.legend()
     plt.tight_layout()
     return fig
-
-
 
 
 def fig_monthly_plotly(df: pd.DataFrame, countries: list, title: str) -> go.Figure:
@@ -427,8 +469,6 @@ def fig_monthly_plotly(df: pd.DataFrame, countries: list, title: str) -> go.Figu
     return fig
 
 
-
-
 def df_to_png_table(df: pd.DataFrame, title: str = None, scale=(1.2,1.4)):
     fig, ax = plt.subplots(figsize=(10, 0.6 + max(len(df),1)*0.35))
     ax.axis("off")
@@ -453,6 +493,7 @@ def b64_download_link(data: bytes, filename: str, label: str):
     href = f'<a href="data:file/png;base64,{b64}" download="{filename}">{label}</a>'
     st.markdown(href, unsafe_allow_html=True)
 
+
 # === Rendu Streamlit de l’onglet ===
 def render_key_locations_export():
     st.header("Key locations export")
@@ -465,7 +506,6 @@ def render_key_locations_export():
     query_name = QUERY_BY_LOCATION[location]
     if isinstance(query_name, str) and query_name.startswith("<") and query_name.endswith(">"):
         st.info(f"⚠️ Renseigne le 'query_name' Petro-Logistics pour **{location}** dans QUERY_BY_LOCATION.")
-
 
     colA, colB = st.columns(2)
     with colA:
@@ -510,11 +550,11 @@ def render_key_locations_export():
 
         # Calculs
         df_month = compute_monthly(root, countries)
-        df_month = harmonize_country_cols(df_month)  # <-- AJOUT
+        df_month = harmonize_country_cols(df_month)  # harmonisation (ex: Turkiye -> Turkey)
 
         df_dis = compute_discharge_table(root, target_year, target_month)
-        df_yoy = compute_yoy(root, countries, target_year, target_month)
-        yoy_text = yoy_narrative(df_yoy, target_year, target_month)  # <-- FIX
+        df_mom = compute_mom(root, countries, target_year, target_month)
+        mom_text = mom_narrative(df_mom, target_year, target_month)
 
     # === Affichage ===
     st.subheader("Monthly exports")
@@ -527,7 +567,6 @@ def render_key_locations_export():
     # ➜ Graphe statique (Matplotlib) pour l’export PNG
     fig_static = fig_monthly_matplotlib(df_month, countries, title)
 
-
     st.subheader("Ship tracking — exports by load month")
     st.dataframe(df_dis, use_container_width=True)
     st.download_button(
@@ -537,16 +576,24 @@ def render_key_locations_export():
         mime="text/csv"
     )
 
-    st.subheader(f"YoY — {datetime(target_year, target_month,1):%B} {target_year} vs {target_year-1}")
-    st.dataframe(style_yoy_table(df_yoy), use_container_width=True)
+    # --- MoM table & narration (remplace YoY) ---
+    # libellés pour le sous-titre
+    if target_month == 1:
+        prev_y, prev_m = target_year - 1, 12
+    else:
+        prev_y, prev_m = target_year, target_month - 1
+    prev_label_h = datetime(prev_y, prev_m, 1).strftime('%B %Y')
+    curr_label_h = datetime(target_year, target_month, 1).strftime('%B %Y')
 
+    st.subheader(f"MoM — {curr_label_h} vs {prev_label_h}")
+    st.dataframe(style_mom_table(df_mom), use_container_width=True)
     st.download_button(
-        "Download YoY CSV",
-        df_yoy.to_csv(index=False).encode(),
-        file_name=f"yoy_{location}_{target_year}-{target_month:02}.csv",
+        "Download MoM CSV",
+        df_mom.to_csv(index=False).encode(),
+        file_name=f"mom_{location}_{target_year}-{target_month:02}.csv",
         mime="text/csv"
     )
-    st.info(yoy_text)
+    st.info(mom_text)
 
     # Exports PNG (optionnels)
     st.markdown("**PNG exports (optionnels)**")
@@ -554,16 +601,20 @@ def render_key_locations_export():
     b64_download_link(png_monthly, f"monthly_{location}_{target_year}-{target_month:02}.png",
                       "Download monthly chart (PNG)")
 
-    fig_yoy_tbl = df_to_png_table(df_yoy, title=f"YoY — {datetime(target_year, target_month,1):%B} {target_year} vs {target_year-1}")
-    png_yoy = make_download_png(fig_yoy_tbl)
-    b64_download_link(png_yoy, f"yoy_{location}_{target_year}-{target_month:02}.png",
-                      "Download YoY table (PNG)")
+    fig_mom_tbl = df_to_png_table(
+        df_mom,
+        title=f"MoM — {curr_label_h} vs {prev_label_h}"
+    )
+    png_mom = make_download_png(fig_mom_tbl)
+    b64_download_link(png_mom, f"mom_{location}_{target_year}-{target_month:02}.png",
+                      "Download MoM table (PNG)")
 
     if not df_dis.empty:
         fig_dis_tbl = df_to_png_table(df_dis, title=f"Discharges {target_year}-{target_month:02}", scale=(1.0,1.2))
         png_dis = make_download_png(fig_dis_tbl)
         b64_download_link(png_dis, f"discharge_{location}_{target_year}-{target_month:02}.png",
                           "Download discharge table (PNG)")
+
 
 # === Lancer comme app Streamlit si exécuté directement ===
 if __name__ == "__main__":
