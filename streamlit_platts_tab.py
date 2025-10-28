@@ -9,9 +9,9 @@ import seaborn as sns
 from datetime import datetime
 
 def generate_platts_analytics_tab():
-    st.header("🧠 Platts Window Analytics (Interactif)")
+    st.header("🧠 Platts Window Analytics (Interactive)")
 
-    # === Chargement et prépa des données ===
+    # === Load and prepare data ===
     excel_path = "Platts window/Window platts global data.xlsx"
     df = pd.read_excel(excel_path, sheet_name="Platts window")
     df['ORDER_DATE'] = pd.to_datetime(df['ORDER_DATE'], errors='coerce')
@@ -21,7 +21,7 @@ def generate_platts_analytics_tab():
     df.dropna(subset=['ORDER_DATE', 'BUYER', 'SELLER', 'DEAL_QUANTITY', 'HUB'], inplace=True)
     df = df[~df['HUB'].str.contains("1%", na=False)]
 
-    # Enrichissements
+    # Enrichments
     df['YEAR'] = df['ORDER_DATE'].dt.year
     df['MONTH_PERIOD'] = df['ORDER_DATE'].dt.to_period('M')
     df['DATE'] = df['ORDER_DATE'].dt.date
@@ -31,27 +31,25 @@ def generate_platts_analytics_tab():
     df['BUYER'] = df['BUYER'].astype(str).str.split().str[0]
     df['SELLER'] = df['SELLER'].astype(str).str.split().str[0]
 
-    st.success("✅ Données chargées.")
+    st.success("✅ Data successfully loaded.")
 
-    # === Sélection du hub (grade) ===
+    # === Hub (grade) selection ===
     grades = sorted(df['HUB'].unique())
-    selected_grade = st.selectbox("🛢 Choisir un hub/grade :", grades)
+    selected_grade = st.selectbox("🛢 Choose a hub/grade:", grades)
     df_grade = df[df['HUB'] == selected_grade]
     current_month = pd.Timestamp.today().to_period('M')
     current_df = df_grade[df_grade['MONTH_PERIOD'] == current_month]
 
     if current_df.empty:
-        st.warning("⚠️ Aucune donnée pour le mois courant.")
+        st.warning("⚠️ No data available for the current month.")
         return
 
-    st.subheader(f"📊 Analyse de {selected_grade} ({current_month})")
+    st.subheader(f"📊 Analysis of {selected_grade} ({current_month})")
 
-    # === Seasonal Diff interactif (Window - Settlement) ===
-    with st.expander("📈 Seasonal Diff (Window - Settlement) — vue globale par grade", expanded=True):
-        # Prix moyens "window" par date & hub
+    # === Seasonal Diff (Window - Settlement) ===
+    with st.expander("📈 Seasonal Diff (Window - Settlement) — Global view by grade", expanded=True):
         window_prices = df.groupby(['ORDER_DATE', 'HUB'])['PRICE'].mean().reset_index()
 
-        # Feuille "Settlement price"
         settle = pd.read_excel(excel_path, sheet_name="Settlement price", skiprows=6)
         settle = settle.rename(columns={
             settle.columns[0]: 'DATE',
@@ -67,7 +65,6 @@ def generate_platts_analytics_tab():
         merged['Year'] = merged['DATE'].dt.year
         merged = merged[merged['Year'] >= 2023].copy()
 
-    # Déduire automatiquement le grade (0.5% ou 3.5%) depuis le hub sélectionné
     if "0.5" in selected_grade:
         grade_choice = "0.5%"
     else:
@@ -78,7 +75,6 @@ def generate_platts_analytics_tab():
         z = (mg['DIFF'] - mg['DIFF'].mean()) / mg['DIFF'].std(ddof=0)
         mg = mg[z.abs() < 3]
 
-    # PseudoDate = toutes les années alignées sur 2000 pour l’effet saisonnier
     mg['PseudoDate'] = mg['DATE'].apply(lambda d: pd.Timestamp(2000, d.month, d.day))
 
     fig_sd = px.line(
@@ -96,10 +92,8 @@ def generate_platts_analytics_tab():
     fig_sd.update_traces(hovertemplate="%{x|%b %d} • %{fullData.name}<br>Diff: %{y:.2f}")
     st.plotly_chart(fig_sd, use_container_width=True)
 
-
-
-    # === 1) Heatmap interactive (mois courant) ===
-    st.markdown("#### 🔥 Heatmap – Volumes journaliers (mois courant)")
+    # === 1) Daily Heatmap (current month) ===
+    st.markdown("#### 🔥 Heatmap – Daily volumes (current month)")
     heatmap_df = (
         current_df
         .groupby(['DAY', 'MONTH'])['DEAL_QUANTITY']
@@ -110,7 +104,7 @@ def generate_platts_analytics_tab():
     )
     fig1 = px.imshow(
         heatmap_df,
-        labels=dict(x="Mois", y="Jour", color="Volume"),
+        labels=dict(x="Month", y="Day", color="Volume"),
         x=heatmap_df.columns,
         y=heatmap_df.index,
         text_auto=".1f",
@@ -118,8 +112,8 @@ def generate_platts_analytics_tab():
     )
     st.plotly_chart(fig1, use_container_width=True)
 
-    # === Yearly Heatmap interactif (année en cours) ===
-    st.markdown("#### 🗓️ Yearly Heatmap – Volumes journaliers (année en cours)")
+    # === 2) Yearly Heatmap (current year) ===
+    st.markdown("#### 🗓️ Yearly Heatmap – Daily volumes (current year)")
     year_now = datetime.now().year
     months_order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
@@ -145,13 +139,12 @@ def generate_platts_analytics_tab():
         margin=dict(t=40, b=10, l=10, r=10),
         coloraxis_colorbar=dict(title="Volume")
     )
-    # Hover lisible
     fig_y.update_traces(hovertemplate="Month: %{y}<br>Day: %{x}<br>Volume: %{z:.1f}")
 
     st.plotly_chart(fig_y, use_container_width=True)
 
-    # === 3) Réseau Acheteurs–Vendeurs interactif (liens colorés) ===
-    st.markdown("#### 🔗 Réseau Acheteurs – Vendeurs")
+    # === 3) Buyer–Seller Network (interactive) ===
+    st.markdown("#### 🔗 Buyer–Seller Network")
     interaction = (
         current_df
         .groupby(['BUYER', 'SELLER'])['DEAL_QUANTITY']
@@ -180,7 +173,7 @@ def generate_platts_analytics_tab():
                 mode='lines',
                 line=dict(width=1 + 8*((q - qmin)/rng), color=qty_to_color(q)),
                 hoverinfo='text',
-                text=f"{u} → {v}<br>Quantité: {q:,.0f}",
+                text=f"{u} → {v}<br>Quantity: {q:,.0f}",
                 showlegend=False
             )
         )
@@ -200,7 +193,7 @@ def generate_platts_analytics_tab():
         x=[None], y=[None], mode='markers',
         marker=dict(colorscale='Viridis', showscale=True, cmin=qmin, cmax=qmax,
                     color=[qmin], size=0.0001,
-                    colorbar=dict(title='Quantité', thickness=15, len=0.8)),
+                    colorbar=dict(title='Quantity', thickness=15, len=0.8)),
         hoverinfo='none', showlegend=False
     )
     fig2 = go.Figure(data=edge_traces + [node_trace, colorbar_trace])
@@ -212,32 +205,32 @@ def generate_platts_analytics_tab():
     )
     st.plotly_chart(fig2, use_container_width=True)
 
-    # === 4) Volumes quotidiens ===
-    st.markdown("#### 📅 Volumes quotidiens")
+    # === 4) Daily Volumes ===
+    st.markdown("#### 📅 Daily Volumes")
     daily = current_df.groupby('DATE')['DEAL_QUANTITY'].sum().reset_index()
     fig3 = px.line(
         daily, x='DATE', y='DEAL_QUANTITY',
         markers=True, labels={'DEAL_QUANTITY': 'Volume', 'DATE': 'Date'},
-        title="Volumes par jour"
+        title="Daily Volumes"
     )
     st.plotly_chart(fig3, use_container_width=True)
 
-    # === 5) Répartition Acheteurs / Vendeurs ===
-    st.markdown("#### 👥 Répartition Acheteurs / Vendeurs")
+    # === 5) Buyer / Seller Distribution ===
+    st.markdown("#### 👥 Buyer / Seller Distribution")
     buyers = current_df.groupby('BUYER')['DEAL_QUANTITY'].sum().reset_index()
     sellers = current_df.groupby('SELLER')['DEAL_QUANTITY'].sum().reset_index()
 
     fig4 = px.bar(
         buyers.sort_values('DEAL_QUANTITY', ascending=False),
         x='BUYER', y='DEAL_QUANTITY',
-        labels={'DEAL_QUANTITY': 'Volume', 'BUYER': 'Acheteur'},
-        title="Top Acheteurs"
+        labels={'DEAL_QUANTITY': 'Volume', 'BUYER': 'Buyer'},
+        title="Top Buyers"
     )
     fig5 = px.bar(
         sellers.sort_values('DEAL_QUANTITY', ascending=False),
         x='SELLER', y='DEAL_QUANTITY',
-        labels={'DEAL_QUANTITY': 'Volume', 'SELLER': 'Vendeur'},
-        title="Top Vendeurs"
+        labels={'DEAL_QUANTITY': 'Volume', 'SELLER': 'Seller'},
+        title="Top Sellers"
     )
     col1, col2 = st.columns(2)
     with col1:
