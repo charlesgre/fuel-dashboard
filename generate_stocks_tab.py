@@ -135,8 +135,6 @@ def _read_excel_all(path: str, _mtime: float) -> tuple[pd.DataFrame, list[str]]:
     return out, used_sheets
 
 
-from pathlib import Path
-
 def load_data() -> pd.DataFrame:
     # Base = racine du repo donnée par app.py (fallback = dossier du module)
     base = Path(os.environ.get("FUEL_DASH_DATA_ROOT", Path(__file__).resolve().parent))
@@ -181,6 +179,13 @@ def load_data() -> pd.DataFrame:
     df["ISOYear"] = wk.year.astype(int)
     df["Week"]    = wk.week.astype(int)
 
+    # ========= Normalisations demandées =========
+    # Fujairah & Singapore : diviser par 6.35 (pas de changement d'unité demandé)
+    mask_fs = df["TITLE"].isin(["Fujairah stocks", "Singapore stocks"])
+    df.loc[mask_fs, "VALUE"] = df.loc[mask_fs, "VALUE"] / 6.35
+    # PADD 3 : aucune conversion de valeurs, ni d'unité dans la data
+    # ===========================================
+
     # 🔎 Debug visible : chemin absolu + mtime
     st.caption(
         "Using sheets: **{sheets}** | file: `{file}` | modified: {ts}".format(
@@ -190,8 +195,7 @@ def load_data() -> pd.DataFrame:
         )
     )
 
-
-    # 🔎 Debug utile : dernière date/valeur par titre (tu vois tout de suite si ça colle)
+    # 🔎 Debug utile : dernière date/valeur par titre
     latest = (df.sort_values("ASSESSDATE")
                 .groupby("TITLE", as_index=False)
                 .agg(LatestDate=("ASSESSDATE","last"), LatestValue=("VALUE","last")))
@@ -213,13 +217,12 @@ def _nearest_on_or_before(series: pd.Series, target_date: pd.Timestamp):
     if s.empty: return None, None
     idx = s.index.max(); return idx, s.loc[idx]
 
-def compute_change_table(df_region: pd.DataFrame):
+def compute_change_table(df_region: pd.DataFrame, uom_override: str | None = None):
     ts = (df_region.sort_values("ASSESSDATE")
                     .set_index("ASSESSDATE")["VALUE"]
                     .dropna()
                     .asfreq("D", method="pad"))
     latest_date = ts.index.max(); latest_val = float(ts.loc[latest_date])
-
 
     rows = [["Latest", latest_date.strftime("%d-%m-%Y"), f"{latest_val:,.2f}", "-", "-"]]
     for label, delta in [("Previous week", pd.DateOffset(weeks=1)),
@@ -233,7 +236,12 @@ def compute_change_table(df_region: pd.DataFrame):
             pct = (chg / v) * 100 if v else np.nan
             rows.append([label, d.strftime("%d-%m-%Y"), f"{v:,.2f}", f"{chg:,.2f}", f"{pct:,.2f}%" if np.isfinite(pct) else "-"])
 
-    uom = df_region["UOM"].mode().iloc[0] if not df_region["UOM"].empty else ""
+    # Unité affichée : override possible (ex: PADD 3 -> "MMB")
+    if uom_override:
+        uom = uom_override
+    else:
+        uom = df_region["UOM"].mode().iloc[0] if not df_region["UOM"].empty else ""
+
     table = pd.DataFrame(rows, columns=["Label", "Date",
                                         f"Value ({uom})" if uom else "Value",
                                         f"Change ({uom})" if uom else "Change",
@@ -269,9 +277,14 @@ def build_plotly_chart(data: pd.DataFrame, title: str) -> go.Figure:
                                  line=dict(color=color, width=2) if color else dict(width=2),
                                  opacity=opacity, connectgaps=True))
 
+    # Libellé d'unité de l'axe Y :
+    # - PADD 3 : afficher MMB (sans conversion des valeurs)
+    # - autres : KT
+    y_unit = "MMB" if title == "PADD 3 stocks" else "KT"
+
     fig.update_layout(
         title=f"Stock saisonnier hebdomadaire ({HIST_START}–{dt.date.today().year}) – {title}",
-        xaxis_title="Semaine", yaxis_title="Stocks (KT)",
+        xaxis_title="Semaine", yaxis_title=f"Stocks ({y_unit})",
         hovermode="x unified", legend_title="Année",
         margin=dict(l=30, r=10, t=60, b=30), height=520
     )
@@ -300,15 +313,17 @@ def generate_stocks_tab():
         miny, maxy = int(df["ISOYear"].min()), int(df["ISOYear"].max())
         years = st.slider("Années à afficher", miny, maxy, (max(miny, maxy-5), maxy))
 
-    # <-- en dehors du with
+    # filtrage
     df = df[df["TITLE"].isin(selected) & df["ISOYear"].between(years[0], years[1])]
-
 
     for title in selected:
         temp = df[df["TITLE"] == title]
         st.plotly_chart(build_plotly_chart(temp, title), use_container_width=True)
 
-        table_df, _ = compute_change_table(temp[["ASSESSDATE", "VALUE", "UOM"]])
+        # Table : override de l'unité pour PADD 3 -> "MMB" (valeurs non modifiées)
+        uom_override = "MMB" if title == "PADD 3 stocks" else None
+        table_df, _ = compute_change_table(temp[["ASSESSDATE", "VALUE", "UOM"]], uom_override=uom_override)
+
         st.dataframe(table_df, use_container_width=True, hide_index=True)
         st.download_button(
             label=f"Télécharger la table – {title} (CSV)",
