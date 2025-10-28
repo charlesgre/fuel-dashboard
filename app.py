@@ -158,8 +158,6 @@ with tab3:
             st.exception(e)
         st.stop()
 
-    st.write(f"Figures CDD récupérées ({len(figures)}): {list(figures.keys())}")
-
     st.subheader("Egypt")
     egypt_figs = {k: v for k, v in figures.items() if 'Egypt' in k}
     cols = st.columns(3); col_idx = 0
