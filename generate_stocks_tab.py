@@ -23,18 +23,16 @@ OTHER_ALPHA = 0.35
 HIST_START, HIST_END = 2015, 2024
 
 
-# ---------- helpers: tolerant column mapping ----------
+# ---------- helpers ----------
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).strip().lower())
 
 def _find_col(cols, keywords):
     cols = list(cols)
     normed = {_norm(c): c for c in cols}
-    # 1) exact match on normalized
     for kw in keywords:
         if kw in normed:
             return normed[kw]
-    # 2) substring match on normalized names
     for c in cols:
         nc = _norm(c)
         if any(kw in nc for kw in keywords):
@@ -70,16 +68,14 @@ def _map_required_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# ---------- data loading (simple & robust) ----------
+# ---------- data loading ----------
 @st.cache_data(show_spinner=False)
 def _read_excel_all(path: str, _mtime: float) -> tuple[pd.DataFrame, list[str]]:
     xls = pd.ExcelFile(path)
     sheet_order = [s for s in SHEET_CANDIDATES if s in xls.sheet_names] + \
                   [s for s in xls.sheet_names if s not in SHEET_CANDIDATES]
 
-    used_sheets = []
-    frames = []
-    last_error = None
+    used_sheets, frames, last_error = [], [], None
 
     for sheet in sheet_order:
         try:
@@ -89,13 +85,10 @@ def _read_excel_all(path: str, _mtime: float) -> tuple[pd.DataFrame, list[str]]:
 
             raw.columns = [str(c) for c in raw.columns]
             df = _map_required_columns(raw)
-
-            # types
             df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce", dayfirst=True)
             df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
             df = df.dropna(subset=["ASSESSDATE", "VALUE"])
 
-            # mapping titres tolérant
             def map_title(d):
                 if d in TITLE_MAP: return TITLE_MAP[d]
                 s = str(d).lower()
@@ -109,59 +102,37 @@ def _read_excel_all(path: str, _mtime: float) -> tuple[pd.DataFrame, list[str]]:
             if df["TITLE"].notna().any():
                 used_sheets.append(sheet)
                 frames.append(df[df["TITLE"].notna()].copy())
-
         except Exception as e:
             last_error = e
             continue
 
     if not frames:
-        if last_error:
-            raise ValueError(f"Unable to parse any sheet in {os.path.basename(path)}. "
-                             f"Sheets: {xls.sheet_names}. Last error: {last_error}")
-        raise ValueError(f"No usable sheet found in {os.path.basename(path)}. Sheets: {xls.sheet_names}")
-
-    # ✅ concatène TOUTES les feuilles valides
+        raise ValueError(f"Unable to parse any sheet in {os.path.basename(path)}. Last error: {last_error}")
     out = pd.concat(frames, ignore_index=True)
 
-    # ISO year/week
     wk = out["ASSESSDATE"].dt.isocalendar()
     out["ISOYear"] = wk.year.astype(int)
     out["Week"] = wk.week.astype(int)
-
-    # UOM manquant
     if "UOM" not in out.columns:
         out["UOM"] = ""
-
     return out, used_sheets
 
 
 def load_data() -> pd.DataFrame:
-    # Base = racine du repo donnée par app.py (fallback = dossier du module)
     base = Path(os.environ.get("FUEL_DASH_DATA_ROOT", Path(__file__).resolve().parent))
-
-    # Candidats dans la racine du projet
-    candidates = [
-        base / "Data global stocks.xlsx",
-        base / "Stocks" / "Data global stocks.xlsx",
-    ]
+    candidates = [base / "Data global stocks.xlsx", base / "Stocks" / "Data global stocks.xlsx"]
     existing = [p for p in candidates if p.exists()]
     if not existing:
         st.error(f"Excel not found. Tried: {[str(p) for p in candidates]}")
         st.stop()
-
-    # ✅ prendre la copie LA PLUS RÉCENTE
     path = max(existing, key=lambda p: p.stat().st_mtime)
-
-    # lecture (le mtime invalide le cache si le fichier change)
     df, used_sheets = _read_excel_all(str(path), path.stat().st_mtime)
 
-    # --- types ---
     df["ASSESSDATE"] = pd.to_datetime(df["ASSESSDATE"], errors="coerce", dayfirst=True)
     df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
     df = df.dropna(subset=["ASSESSDATE", "VALUE"])
     df["DESCRIPTION"] = df["DESCRIPTION"].astype(str).fillna("")
 
-    # --- mapping titres ---
     def map_title(desc) -> str | None:
         if desc in TITLE_MAP: return TITLE_MAP[desc]
         s = str(desc).lower()
@@ -174,19 +145,16 @@ def load_data() -> pd.DataFrame:
     df["TITLE"] = df["DESCRIPTION"].map(map_title)
     df = df[df["TITLE"].notna()].copy()
 
-    # --- ISO Year/Week ---
     wk = df["ASSESSDATE"].dt.isocalendar()
-    df["ISOYear"] = wk.year.astype(int)
-    df["Week"]    = wk.week.astype(int)
+    df["ISOYear"], df["Week"] = wk.year.astype(int), wk.week.astype(int)
 
-    # ========= Normalisations demandées =========
-    # Fujairah & Singapore : diviser par 6.35 (pas de changement d'unité demandé)
+    # ========= conversions demandées =========
+    # Fujairah & Singapore : diviser par 6.35 (affichées en KT)
     mask_fs = df["TITLE"].isin(["Fujairah stocks", "Singapore stocks"])
     df.loc[mask_fs, "VALUE"] = df.loc[mask_fs, "VALUE"] / 6.35
-    # PADD 3 : aucune conversion de valeurs, ni d'unité dans la data
-    # ===========================================
+    # PADD 3 : aucune conversion de valeurs, affichage en MMB uniquement
+    # =========================================
 
-    # 🔎 Debug visible : chemin absolu + mtime
     st.caption(
         "Using sheets: **{sheets}** | file: `{file}` | modified: {ts}".format(
             sheets=", ".join(used_sheets),
@@ -195,14 +163,13 @@ def load_data() -> pd.DataFrame:
         )
     )
 
-    # 🔎 Debug utile : dernière date/valeur par titre
     latest = (df.sort_values("ASSESSDATE")
                 .groupby("TITLE", as_index=False)
                 .agg(LatestDate=("ASSESSDATE","last"), LatestValue=("VALUE","last")))
     latest["LatestDate"] = latest["LatestDate"].dt.strftime("%d-%m-%Y")
     st.dataframe(latest, use_container_width=True, hide_index=True)
-
     return df
+
 
 # ---------- weekly stats ----------
 def weekly_stats(hist_df: pd.DataFrame):
@@ -215,14 +182,16 @@ def weekly_stats(hist_df: pd.DataFrame):
 def _nearest_on_or_before(series: pd.Series, target_date: pd.Timestamp):
     s = series[series.index <= target_date]
     if s.empty: return None, None
-    idx = s.index.max(); return idx, s.loc[idx]
+    idx = s.index.max()
+    return idx, s.loc[idx]
 
 def compute_change_table(df_region: pd.DataFrame, uom_override: str | None = None):
     ts = (df_region.sort_values("ASSESSDATE")
                     .set_index("ASSESSDATE")["VALUE"]
                     .dropna()
                     .asfreq("D", method="pad"))
-    latest_date = ts.index.max(); latest_val = float(ts.loc[latest_date])
+    latest_date = ts.index.max()
+    latest_val = float(ts.loc[latest_date])
 
     rows = [["Latest", latest_date.strftime("%d-%m-%Y"), f"{latest_val:,.2f}", "-", "-"]]
     for label, delta in [("Previous week", pd.DateOffset(weeks=1)),
@@ -234,14 +203,10 @@ def compute_change_table(df_region: pd.DataFrame, uom_override: str | None = Non
         else:
             chg = latest_val - v
             pct = (chg / v) * 100 if v else np.nan
-            rows.append([label, d.strftime("%d-%m-%Y"), f"{v:,.2f}", f"{chg:,.2f}", f"{pct:,.2f}%" if np.isfinite(pct) else "-"])
+            rows.append([label, d.strftime("%d-%m-%Y"), f"{v:,.2f}",
+                         f"{chg:,.2f}", f"{pct:,.2f}%" if np.isfinite(pct) else "-"])
 
-    # Unité affichée : override possible (ex: PADD 3 -> "MMB")
-    if uom_override:
-        uom = uom_override
-    else:
-        uom = df_region["UOM"].mode().iloc[0] if not df_region["UOM"].empty else ""
-
+    uom = uom_override if uom_override else (df_region["UOM"].mode().iloc[0] if not df_region["UOM"].empty else "")
     table = pd.DataFrame(rows, columns=["Label", "Date",
                                         f"Value ({uom})" if uom else "Value",
                                         f"Change ({uom})" if uom else "Change",
@@ -252,14 +217,17 @@ def compute_change_table(df_region: pd.DataFrame, uom_override: str | None = Non
 # ---------- Plotly chart ----------
 def build_plotly_chart(data: pd.DataFrame, title: str) -> go.Figure:
     hist = data[(data["ISOYear"] >= HIST_START) & (data["ISOYear"] <= HIST_END)]
-    mean_vals, min_vals, max_vals = weekly_stats(hist); x = mean_vals.index
+    mean_vals, min_vals, max_vals = weekly_stats(hist)
+    x = mean_vals.index
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=min_vals, mode="lines", line=dict(width=0), showlegend=False))
-    fig.add_trace(go.Scatter(x=x, y=max_vals, mode="lines", line=dict(width=0), fill="tonexty",
-                             fillcolor="rgba(128,128,128,0.30)", name=f"Range {HIST_START}–{HIST_END}"))
+    fig.add_trace(go.Scatter(x=x, y=max_vals, mode="lines", line=dict(width=0),
+                             fill="tonexty", fillcolor="rgba(128,128,128,0.30)",
+                             name=f"Range {HIST_START}–{HIST_END}"))
     fig.add_trace(go.Scatter(x=x, y=mean_vals, mode="lines",
-                             line=dict(color="black", dash="dash", width=2), name=f"Moyenne {HIST_START}–{HIST_END}"))
+                             line=dict(color="black", dash="dash", width=2),
+                             name=f"Moyenne {HIST_START}–{HIST_END}"))
 
     for year, grp in data.groupby("ISOYear"):
         weekly_vals = (grp.sort_values("ASSESSDATE")
@@ -271,17 +239,12 @@ def build_plotly_chart(data: pd.DataFrame, title: str) -> go.Figure:
         elif year == 2024: color = COLOR_2024
         elif year == 2023: color = COLOR_2023
         else: opacity = OTHER_ALPHA
-
         fig.add_trace(go.Scatter(x=weekly_vals.index, y=weekly_vals.values,
                                  mode="lines", name=str(year),
                                  line=dict(color=color, width=2) if color else dict(width=2),
                                  opacity=opacity, connectgaps=True))
 
-    # Libellé d'unité de l'axe Y :
-    # - PADD 3 : afficher MMB (sans conversion des valeurs)
-    # - autres : KT
     y_unit = "MMB" if title == "PADD 3 stocks" else "KT"
-
     fig.update_layout(
         title=f"Stock saisonnier hebdomadaire ({HIST_START}–{dt.date.today().year}) – {title}",
         xaxis_title="Semaine", yaxis_title=f"Stocks ({y_unit})",
@@ -297,32 +260,36 @@ def build_plotly_chart(data: pd.DataFrame, title: str) -> go.Figure:
 def generate_stocks_tab():
     st.subheader("Global stocks (interactif)")
 
-    # optional reload button to clear cache when the file updates
     if st.button("🔄 Reload stocks data"):
         _read_excel_all.clear()
         st.rerun()
 
     df = load_data()
     df = df[df["ISOYear"] >= 2015].copy()
-
     regions = sorted(df["TITLE"].unique())
+
     c1, c2 = st.columns([2, 1])
     with c1:
         selected = st.multiselect("Régions", regions, default=regions)
     with c2:
         miny, maxy = int(df["ISOYear"].min()), int(df["ISOYear"].max())
-        years = st.slider("Années à afficher", miny, maxy, (max(miny, maxy-5), maxy))
+        years = st.slider("Années à afficher", miny, maxy,
+                          (max(miny, maxy-5), maxy))
 
-    # filtrage
     df = df[df["TITLE"].isin(selected) & df["ISOYear"].between(years[0], years[1])]
 
     for title in selected:
         temp = df[df["TITLE"] == title]
         st.plotly_chart(build_plotly_chart(temp, title), use_container_width=True)
 
-        # Table : override de l'unité pour PADD 3 -> "MMB" (valeurs non modifiées)
-        uom_override = "MMB" if title == "PADD 3 stocks" else None
-        table_df, _ = compute_change_table(temp[["ASSESSDATE", "VALUE", "UOM"]], uom_override=uom_override)
+        # unités d’affichage :
+        if title == "PADD 3 stocks":
+            uom_override = "MMB"
+        else:
+            uom_override = "KT"
+
+        table_df, _ = compute_change_table(temp[["ASSESSDATE", "VALUE", "UOM"]],
+                                           uom_override=uom_override)
 
         st.dataframe(table_df, use_container_width=True, hide_index=True)
         st.download_button(
