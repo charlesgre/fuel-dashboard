@@ -153,10 +153,10 @@ def generate_fuel_vs_gas_tab():
     df_jkm = dfs["df_jkm"].copy()
     df_ttf = dfs["df_ttf"].copy()
 
-    # Filtres de période rapides
+    # Quick period filters
     preset = st.radio(
-        "Période",
-        ["3M", "YTD", "Depuis 2022", "Tout"],
+        "Period",
+        ["3M", "YTD", "Since 2022", "All"],
         horizontal=True,
         index=0,
     )
