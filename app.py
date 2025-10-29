@@ -6,7 +6,7 @@ from datetime import datetime
 
 import streamlit as st
 
-from generate_charts import generate_price_charts
+from generate_charts import generate_price_charts, generate_nwe_med_diff_charts
 from bunker_diff import plot_bunker_price_diffs
 from fge_balances import plot_fge_balances, load_fge_balances
 from forward_curves import generate_forward_curves_tab
@@ -140,6 +140,23 @@ with tab1:
             st.subheader(title)
             st.plotly_chart(fig, use_container_width=True, key=f"price_{i}")
         col_idx = (col_idx + 1) % 3
+
+    
+        # --- NWE – MED diffs (juste en dessous des prix) ---
+    st.divider()
+    st.header("NWE – MED diffs")
+
+    diff_charts = generate_nwe_med_diff_charts()
+    if diff_charts:
+        cols = st.columns(3); col_idx = 0
+        for j, (name, fig) in enumerate(diff_charts.items()):
+            with cols[col_idx]:
+                st.subheader(name.replace("_", " "))
+                st.plotly_chart(fig, use_container_width=True, key=f"diff_{j}")
+            col_idx = (col_idx + 1) % 3
+    else:
+        st.info("Aucun graphique de diff disponible (vérifie l’onglet 'NWE -MED diffs' dans l’Excel).")
+
 
 # === TAB 2: BUNKER DIFF ===
 with tab2:
