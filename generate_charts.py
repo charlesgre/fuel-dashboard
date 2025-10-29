@@ -94,13 +94,15 @@ def generate_price_charts(selected_titles=None):
 def generate_nwe_med_diff_charts():
     """
     Lit l’onglet 'NWE -MED diffs', calcule (V1 - V2) pour chaque paire de SYMBOL,
-    et renvoie un dict { 'PUABC00_vs_PUAAZ00': figure, ... }.
+    et renvoie un dict { 'Diff <DESC1> vs <DESC2>': figure, ... }.
+    (Les codes type PUABC00 ne sont pas affichés.)
     """
     if not os.path.exists(FILE_PATH):
         raise FileNotFoundError(f"Fichier Excel introuvable: {FILE_PATH}")
 
     xl = pd.ExcelFile(FILE_PATH)
-    df_diffs = xl.parse("NWE -MED diffs")  # attend: SYMBOL, DESCRIPTION, ASSESSDATE, VALUE
+    # attend : colonnes SYMBOL, DESCRIPTION, ASSESSDATE, VALUE
+    df_diffs = xl.parse("NWE -MED diffs")
 
     # Nettoyage des types/valeurs
     df_diffs["ASSESSDATE"] = pd.to_datetime(df_diffs.get("ASSESSDATE"), errors="coerce")
@@ -110,9 +112,13 @@ def generate_nwe_med_diff_charts():
     # Dictionnaire SYMBOL -> DESCRIPTION (si dispo)
     desc_map = {}
     if "DESCRIPTION" in df_diffs.columns:
-        desc_map = df_diffs.drop_duplicates("SYMBOL").set_index("SYMBOL")["DESCRIPTION"].to_dict()
+        desc_map = (
+            df_diffs.drop_duplicates("SYMBOL")
+                   .set_index("SYMBOL")["DESCRIPTION"]
+                   .to_dict()
+        )
 
-    # Paires (identiques à ton script matplotlib)
+    # Paires identiques à ton script matplotlib
     diff_pairs = [
         ("PUABC00", "PUAAZ00"),
         ("PUABA00", "PUAAY00"),
@@ -124,23 +130,24 @@ def generate_nwe_med_diff_charts():
     charts = {}
 
     for sym1, sym2 in diff_pairs:
-        sub1 = df_diffs[df_diffs["SYMBOL"] == sym1][["ASSESSDATE", "VALUE"]].rename(columns={"VALUE": "V1"})
-        sub2 = df_diffs[df_diffs["SYMBOL"] == sym2][["ASSESSDATE", "VALUE"]].rename(columns={"VALUE": "V2"})
+        sub1 = (df_diffs[df_diffs["SYMBOL"] == sym1][["ASSESSDATE", "VALUE"]]
+                .rename(columns={"VALUE": "V1"}))
+        sub2 = (df_diffs[df_diffs["SYMBOL"] == sym2][["ASSESSDATE", "VALUE"]]
+                .rename(columns={"VALUE": "V2"}))
+
         merged = pd.merge(sub1, sub2, on="ASSESSDATE", how="inner").dropna()
         if merged.empty:
             continue
 
-        # Calcul diff + colonnes temporelles
+        # Calcul du diff et colonnes temporelles
         merged["diff"] = merged["V1"] - merged["V2"]
         merged["Year"] = merged["ASSESSDATE"].dt.year
         merged["DayOfYear"] = merged["ASSESSDATE"].dt.dayofyear
-
-        # Garde uniquement les années connues par ta palette
         merged = merged[merged["Year"].isin(year_colors.keys())]
         if merged.empty:
             continue
 
-        # Figure Plotly avec saisonnalité par année
+        # Figure de saisonnalité
         fig = go.Figure()
         for year in sorted(merged["Year"].unique()):
             if year not in year_colors:
@@ -148,18 +155,16 @@ def generate_nwe_med_diff_charts():
             yd = merged[merged["Year"] == year].copy()
             if yd.empty:
                 continue
-
-            # Dates de référence (saison)
-            ref_dates = pd.to_datetime('2000-01-01') + pd.to_timedelta(yd['DayOfYear'] - 1, unit='D')
-
+            ref_dates = pd.to_datetime("2000-01-01") + pd.to_timedelta(yd["DayOfYear"] - 1, unit="D")
             fig.add_trace(go.Scatter(
                 x=ref_dates,
-                y=yd['diff'],
-                mode='lines',
+                y=yd["diff"],
+                mode="lines",
                 name=str(year),
                 line=dict(color=year_colors[year]),
             ))
 
+        # Titre lisible (sans codes)
         title_txt = f"Diff {desc_map.get(sym1, sym1)} vs {desc_map.get(sym2, sym2)}"
         fig.update_layout(
             title=title_txt,
@@ -171,6 +176,7 @@ def generate_nwe_med_diff_charts():
             legend=dict(orientation="h", y=-0.2),
         )
 
-        charts[f"{sym1}_vs_{sym2}"] = fig
+        # ✅ Clé d’affichage = titre lisible (pas les codes)
+        charts[title_txt] = fig
 
     return charts
