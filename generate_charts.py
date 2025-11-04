@@ -65,14 +65,19 @@ def _seasonality_chart(df, title, ytitle="Value"):
     for year in sorted(df["Year"].unique()):
         if year not in year_colors:
             continue
-        yd = remove_outliers(df[df["Year"] == year], "Value")
+        yd = df[df["Year"] == year].copy()
         if yd.empty:
             continue
+        # 🔧 tri + (optionnel) filtre outliers après tri
+        yd = yd.sort_values("DayOfYear")
+        yd = remove_outliers(yd, "Value")
+
         ref_dates = pd.to_datetime("2000-01-01") + pd.to_timedelta(yd["DayOfYear"] - 1, unit="D")
         fig.add_trace(go.Scatter(
             x=ref_dates, y=yd["Value"], mode="lines",
             name=str(year), line=dict(color=year_colors[year])
         ))
+
     fig.update_layout(
         title=safe_plotly_text(title),
         xaxis_title="Month", yaxis_title=ytitle,
@@ -80,6 +85,7 @@ def _seasonality_chart(df, title, ytitle="Value"):
         template="plotly_white", height=500
     )
     return fig
+
 
 def build_benchmark_section():
     df_raw = _load_data_sheet()
@@ -168,24 +174,29 @@ def build_vgo_section():
     vgo = vgo.dropna(subset=["USD/BBL"])
 
     latest_brent = _latest_brent_from_data_sheet()
-    vgo["Value"] = vgo["USD/BBL"] - latest_brent       # Spread vs Brent
+    vgo["Value"] = vgo["USD/BBL"] - latest_brent
     vgo["Year"] = vgo["ASSESSDATE"].dt.year
     vgo["DayOfYear"] = vgo["ASSESSDATE"].dt.dayofyear
-    vgo = vgo[vgo["Year"].isin(year_colors)]
+
+    # ✅ explicite
+    vgo = vgo[vgo["Year"].isin(year_colors.keys())]
+
+    # (optionnel) si tu peux avoir plusieurs points par jour, garde la moyenne par jour
+    # vgo = (vgo.groupby(["DESCRIPTION", "Year", "DayOfYear"], as_index=False)
+    #          .agg({"Value": "mean"}))
 
     charts = {}
     for vgo_type in sorted(vgo["DESCRIPTION"].dropna().unique()):
-        sub = vgo[vgo["DESCRIPTION"] == vgo_type]
+        sub = vgo[vgo["DESCRIPTION"] == vgo_type][["Value", "Year", "DayOfYear"]].copy()
         if sub.empty:
             continue
-        # On réutilise la même fonction de graphe (colonnes identiques : Value/Year/DayOfYear)
+        # le tri est désormais géré dans _seasonality_chart
         title = f"Seasonality – {vgo_type} Spread vs Brent"
-        fig = _seasonality_chart(sub[["Value", "Year", "DayOfYear"]].copy(),
-                                 title,
-                                 ytitle="USD/bbl (VGO – Brent)")
+        fig = _seasonality_chart(sub, title, ytitle="USD/bbl (VGO – Brent)")
         fig.update_layout(legend=dict(orientation="h", y=-0.2))
         charts[title] = fig
     return charts
+
 
 # ========= Assemblage global =========
 def generate_all_prices():
