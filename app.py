@@ -6,7 +6,7 @@ from datetime import datetime
 
 import streamlit as st
 
-from generate_charts import generate_price_charts, generate_nwe_med_diff_charts
+from generate_charts import generate_all_prices
 from bunker_diff import plot_bunker_price_diffs
 from fge_balances import plot_fge_balances, load_fge_balances
 from forward_curves import generate_forward_curves_tab
@@ -131,31 +131,45 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13
 
 # === TAB 1: PRICES ===
 with tab1:
-    st.header("Seasonality Charts – Main Benchmarks")
-    all_titles = list(generate_price_charts().keys())
-    charts = generate_price_charts(all_titles)
-    cols = st.columns(3); col_idx = 0
-    for i, (title, fig) in enumerate(charts.items()):
-        with cols[col_idx]:
-            st.subheader(title)
-            st.plotly_chart(fig, use_container_width=True, key=f"price_{i}")
-        col_idx = (col_idx + 1) % 3
+    st.header("Seasonality Charts – Prices")
 
-    
-        # --- NWE – MED diffs (juste en dessous des prix) ---
+    @st.cache_data(show_spinner=False)
+    def _get_all_prices():
+        # lit l’Excel une fois et renvoie l’OrderedDict:
+        # {"Benchmarks": {...}, "NWE - MED diffs": {...}, "VGO": {...}}
+        return generate_all_prices()
+
+    sections = _get_all_prices()
+
+    # petit helper d’affichage en grille 3 colonnes
+    def _render_section(charts_dict, key_prefix):
+        if not charts_dict:
+            st.info("Aucun graphique disponible.")
+            return
+        cols = st.columns(3)
+        i = 0
+        for title, fig in charts_dict.items():
+            with cols[i % 3]:
+                st.subheader(title)
+                st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_{i}")
+            i += 1
+
+    # 1) Benchmarks
+    st.subheader("🏁 Benchmarks")
+    _render_section(sections.get("Benchmarks", {}), "bench")
+
     st.divider()
-    st.header("NWE – MED diffs")
 
-    diff_charts = generate_nwe_med_diff_charts()
-    if diff_charts:
-        cols = st.columns(3); col_idx = 0
-        for j, (name, fig) in enumerate(diff_charts.items()):
-            with cols[col_idx]:
-                st.subheader(name.replace("_", " "))
-                st.plotly_chart(fig, use_container_width=True, key=f"diff_{j}")
-            col_idx = (col_idx + 1) % 3
-    else:
-        st.info("Aucun graphique de diff disponible (vérifie l’onglet 'NWE -MED diffs' dans l’Excel).")
+    # 2) NWE – MED diffs
+    st.subheader("⚖️ NWE – MED diffs")
+    _render_section(sections.get("NWE - MED diffs", {}), "diff")
+
+    st.divider()
+
+    # 3) VGO Spread vs Brent
+    st.subheader("🛢️ VGO (Spread vs Brent)")
+    _render_section(sections.get("VGO", {}), "vgo")
+
 
 
 # === TAB 2: BUNKER DIFF ===
