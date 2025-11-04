@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 
-# ⚠️ Chemin corrigé vers ton fichier Excel
+# ⚠️ Chemin vers ton fichier Excel
 FILE_PATH = "Prices/Prices sheet.xlsx"
 
 # 🎯 Titres ciblés (VGO supprimé)
@@ -18,13 +18,22 @@ target_titles = [
     "0.5 Rott cracks M1", "0.5 Singap cracks"
 ]
 
+# Couleurs par année
 year_colors = {
-    2022: 'gray',
-    2023: 'gold',
-    2024: 'green',
-    2025: 'red'
+    2022: "gray",
+    2023: "gold",
+    2024: "green",
+    2025: "red",
 }
 
+# —— Utilitaire pour éviter que Plotly/MathJax interprète le signe $ comme du LaTeX
+def safe_plotly_text(text: str) -> str:
+    """Échappe les $ pour empêcher MathJax de passer en mode 'math'."""
+    if text is None:
+        return ""
+    return text.replace("$", r"\$")
+
+# —— Chargement des données
 def load_excel_data():
     if not os.path.exists(FILE_PATH):
         raise FileNotFoundError(f"Fichier Excel introuvable: {FILE_PATH}")
@@ -35,62 +44,77 @@ def load_excel_data():
     except Exception as e:
         raise RuntimeError(f"Erreur lors du chargement du fichier Excel: {e}")
 
+# —— Préparation des données
 def prepare_data(df_raw, titles_row=3, start_row=7):
     date_col = 0
-    dates = pd.to_datetime(df_raw.iloc[start_row:, date_col], errors='coerce')
+    dates = pd.to_datetime(df_raw.iloc[start_row:, date_col], errors="coerce")
     data = {}
     for col in range(1, df_raw.shape[1]):
         title = df_raw.iloc[titles_row, col]
-        values = pd.to_numeric(df_raw.iloc[start_row:, col], errors='coerce')
+        values = pd.to_numeric(df_raw.iloc[start_row:, col], errors="coerce")
         temp_df = pd.DataFrame({"Date": dates, "Value": values}).dropna()
+        if temp_df.empty:
+            continue
         temp_df["Year"] = temp_df["Date"].dt.year
         temp_df["DayOfYear"] = temp_df["Date"].dt.dayofyear
         data[title] = temp_df
     return data
 
+# —— Filtre des outliers simple (z-score)
 def remove_outliers(df, column="Value", threshold=3):
     z_scores = (df[column] - df[column].mean()) / df[column].std()
     return df[z_scores.abs() < threshold]
 
+# —— Graphe interactif saisonnalité (par année)
 def generate_interactive_chart(df, title):
     fig = go.Figure()
-    for year in sorted(df['Year'].unique()):
-        if year in year_colors:
-            year_data = df[df['Year'] == year]
-            year_data = remove_outliers(year_data, "Value")
-            if year_data.empty:
-                continue
-            ref_dates = pd.to_datetime('2000-01-01') + pd.to_timedelta(year_data['DayOfYear'] - 1, unit='D')
-            fig.add_trace(go.Scatter(
-                x=ref_dates,
-                y=year_data['Value'],
-                mode='lines',
-                name=str(year),
-                line=dict(color=year_colors[year])
-            ))
+
+    for year in sorted(df["Year"].unique()):
+        if year not in year_colors:
+            continue
+        year_data = df[df["Year"] == year]
+        year_data = remove_outliers(year_data, "Value")
+        if year_data.empty:
+            continue
+
+        # Ramène toutes les dates sur une année "référence" pour la saisonnalité
+        ref_dates = pd.to_datetime("2000-01-01") + pd.to_timedelta(
+            year_data["DayOfYear"] - 1, unit="D"
+        )
+
+        fig.add_trace(go.Scatter(
+            x=ref_dates,
+            y=year_data["Value"],
+            mode="lines",
+            name=str(year),
+            line=dict(color=year_colors[year]),
+        ))
+
     fig.update_layout(
-        title=f"Seasonality - {title}",
+        title=safe_plotly_text(f"Seasonality - {title}"),
         xaxis_title="Month",
         yaxis_title="Value",
         xaxis=dict(tickformat="%b", dtick="M1"),
         template="plotly_white",
-        height=500
+        height=500,
     )
     return fig
 
+# —— Génère les graphiques pour une sélection de titres
 def generate_price_charts(selected_titles=None):
     df_raw = load_excel_data()
     all_data = prepare_data(df_raw)
+
     if selected_titles is None:
         selected_titles = target_titles
+
     charts = {}
     for title in selected_titles:
         if title in all_data and not all_data[title].empty:
             charts[title] = generate_interactive_chart(all_data[title], title)
     return charts
 
-
-
+# —— Diffs NWE vs MED
 def generate_nwe_med_diff_charts():
     """
     Lit l’onglet 'NWE -MED diffs', calcule (V1 - V2) pour chaque paire de SYMBOL,
@@ -114,8 +138,8 @@ def generate_nwe_med_diff_charts():
     if "DESCRIPTION" in df_diffs.columns:
         desc_map = (
             df_diffs.drop_duplicates("SYMBOL")
-                   .set_index("SYMBOL")["DESCRIPTION"]
-                   .to_dict()
+                    .set_index("SYMBOL")["DESCRIPTION"]
+                    .to_dict()
         )
 
     # Paires identiques à ton script matplotlib
@@ -155,7 +179,9 @@ def generate_nwe_med_diff_charts():
             yd = merged[merged["Year"] == year].copy()
             if yd.empty:
                 continue
-            ref_dates = pd.to_datetime("2000-01-01") + pd.to_timedelta(yd["DayOfYear"] - 1, unit="D")
+            ref_dates = pd.to_datetime("2000-01-01") + pd.to_timedelta(
+                yd["DayOfYear"] - 1, unit="D"
+            )
             fig.add_trace(go.Scatter(
                 x=ref_dates,
                 y=yd["diff"],
@@ -164,10 +190,10 @@ def generate_nwe_med_diff_charts():
                 line=dict(color=year_colors[year]),
             ))
 
-        # Titre lisible (sans codes)
+        # Titre lisible (sans codes) et SAFE pour Plotly
         title_txt = f"Diff {desc_map.get(sym1, sym1)} vs {desc_map.get(sym2, sym2)}"
         fig.update_layout(
-            title=title_txt,
+            title=safe_plotly_text(title_txt),
             xaxis_title="Month",
             yaxis_title="Diff (USD/MT)",
             xaxis=dict(tickformat="%b", dtick="M1"),
@@ -176,7 +202,7 @@ def generate_nwe_med_diff_charts():
             legend=dict(orientation="h", y=-0.2),
         )
 
-        # ✅ Clé d’affichage = titre lisible (pas les codes)
+        # ✅ Clé d’affichage = titre lisible
         charts[title_txt] = fig
 
     return charts
