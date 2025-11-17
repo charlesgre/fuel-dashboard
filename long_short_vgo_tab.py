@@ -84,9 +84,9 @@ def _month_online_fraction(event_row: pd.Series, year: int, month: int) -> float
 
 def _vgo_yield(crude: Optional[str]) -> float:
     if crude == "sweet":
-        return 0.60
+        return 0.2
     if crude == "sour":
-        return 0.30
+        return 0.5
     return np.nan
 
 
